@@ -593,7 +593,9 @@ impl OfframpProcessorWorker {
                     warn!(transaction_id = %tx_id, provider = %provider_name, error = %e, "provider withdrawal initiation failed");
                     
                     let is_recoverable = match &e {
-                        crate::payments::error::PaymentError::Network(_) | crate::payments::error::PaymentError::Timeout => true,
+                        crate::payments::error::PaymentError::NetworkError { .. } => true,
+                        crate::payments::error::PaymentError::RateLimitError { .. } => true,
+                        crate::payments::error::PaymentError::ProviderError { retryable, .. } => *retryable,
                         // Could expand with more specific error matching here
                         _ => false,
                     };

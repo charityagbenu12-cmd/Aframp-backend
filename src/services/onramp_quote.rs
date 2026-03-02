@@ -41,7 +41,7 @@ impl PaymentProvider {
         match self {
             PaymentProvider::Flutterwave => "flutterwave",
             PaymentProvider::Paystack => "paystack",
-            PaymentProvider::Other => "other",
+            PaymentProvider::Other(_) => "other",
         }
     }
 }
@@ -51,7 +51,7 @@ impl From<&str> for PaymentProvider {
         match s.to_lowercase().as_str() {
             "flutterwave" => PaymentProvider::Flutterwave,
             "paystack" => PaymentProvider::Paystack,
-            _ => PaymentProvider::Other,
+            _ => PaymentProvider::Other(s.to_string()),
         }
     }
 }
@@ -68,7 +68,7 @@ impl Chain {
     pub fn as_str(&self) -> &str {
         match self {
             Chain::Stellar => "stellar",
-            Chain::Other => "other",
+            Chain::Other(_) => "other",
         }
     }
 }
@@ -77,7 +77,7 @@ impl From<&str> for Chain {
     fn from(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "stellar" => Chain::Stellar,
-            _ => Chain::Other,
+            _ => Chain::Other(s.to_string()),
         }
     }
 }

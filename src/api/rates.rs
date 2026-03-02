@@ -176,13 +176,15 @@ pub async fn get_rates(
     // Check cache first
     if let Some(ref cache) = state.cache {
         // Try single rate response
-        if let Ok(Some(cached)) = cache.get::<RateResponse>(&cache_key).await {
+        let cached_result: Result<Option<RateResponse>, _> = cache.get(&cache_key).await;
+        if let Ok(Some(cached)) = cached_result {
             debug!("Cache hit for {}", cache_key);
             return build_cached_response(cached, &headers);
         }
         
         // Try all rates response
-        if let Ok(Some(cached)) = cache.get::<AllRatesResponse>(&cache_key).await {
+        let cached_result: Result<Option<AllRatesResponse>, _> = cache.get(&cache_key).await;
+        if let Ok(Some(cached)) = cached_result {
             debug!("Cache hit for {}", cache_key);
             return build_all_rates_cached_response(cached, &headers);
         }

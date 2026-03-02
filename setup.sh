@@ -5,6 +5,57 @@
 
 set -e  # Exit on any error
 
+# Detect operating system
+detect_os() {
+    case "$(uname -s)" in
+        Linux*)     OS="linux";;
+        Darwin*)    OS="macos";;
+        CYGWIN*)    OS="cygwin";;
+        MINGW*)     OS="mingw";;
+        MSYS*)      OS="msys";;
+        *)          OS="unknown";;
+    esac
+    echo "$OS"
+}
+
+# Detect Linux distribution
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        echo "$ID"
+    elif [ -f /etc/arch-release ]; then
+        echo "arch"
+    elif [ -f /etc/debian_version ]; then
+        echo "debian"
+    else
+        echo "unknown"
+    fi
+}
+
+OS=$(detect_os)
+DISTRO=""
+
+# Validate supported OS and detect distribution
+echo "🔍 Detecting operating system..."
+case "$OS" in
+    linux)
+        DISTRO=$(detect_distro)
+        echo "✅ Detected OS: Linux ($DISTRO)"
+        ;;
+    macos)
+        echo "✅ Detected OS: macOS"
+        ;;
+    *)
+        echo "❌ Unsupported operating system: $OS"
+        echo "This setup script supports Linux and macOS only."
+        echo "Please install the required dependencies manually:"
+        echo "  - Rust (https://rustup.rs/)"
+        echo "  - PostgreSQL (https://www.postgresql.org/download/)"
+        echo "  - Redis (https://redis.io/download)"
+        exit 1
+        ;;
+esac
+
 echo "🚀 Setting up Aframp Backend Development Environment"
 
 # Check if Rust is installed
@@ -19,10 +70,25 @@ fi
 # Check if PostgreSQL is installed
 if ! command -v psql &> /dev/null; then
     echo "🐘 Installing PostgreSQL..."
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        sudo apt update
-        sudo apt install postgresql postgresql-contrib
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
+    if [[ "$OS" == "linux" ]]; then
+        case "$DISTRO" in
+            arch|manjaro|endeavouros|blackarch)
+                sudo pacman -Sy --noconfirm postgresql
+                ;;
+            debian|ubuntu|linuxmint|pop)
+                sudo apt update
+                sudo apt install -y postgresql postgresql-contrib
+                ;;
+            fedora|rhel|centos|rocky|almalinux)
+                sudo dnf install -y postgresql-server postgresql-contrib
+                ;;
+            *)
+                echo "❌ Unsupported Linux distribution: $DISTRO"
+                echo "Please install PostgreSQL manually."
+                exit 1
+                ;;
+        esac
+    elif [[ "$OS" == "macos" ]]; then
         brew install postgresql
     else
         echo "❌ Unsupported OS. Please install PostgreSQL manually."
@@ -35,9 +101,24 @@ fi
 # Check if Redis is installed
 if ! command -v redis-cli &> /dev/null; then
     echo "🧠 Installing Redis..."
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        sudo apt install redis-server
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
+    if [[ "$OS" == "linux" ]]; then
+        case "$DISTRO" in
+            arch|manjaro|endeavouros|blackarch)
+                sudo pacman -Sy --noconfirm redis
+                ;;
+            debian|ubuntu|linuxmint|pop)
+                sudo apt install -y redis-server
+                ;;
+            fedora|rhel|centos|rocky|almalinux)
+                sudo dnf install -y redis
+                ;;
+            *)
+                echo "❌ Unsupported Linux distribution: $DISTRO"
+                echo "Please install Redis manually."
+                exit 1
+                ;;
+        esac
+    elif [[ "$OS" == "macos" ]]; then
         brew install redis
     else
         echo "❌ Unsupported OS. Please install Redis manually."
@@ -49,10 +130,22 @@ fi
 
 # Start services
 echo "🔄 Starting services..."
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    sudo systemctl start postgresql
-    sudo systemctl start redis
-elif [[ "$OSTYPE" == "darwin"* ]]; then
+if [[ "$OS" == "linux" ]]; then
+    case "$DISTRO" in
+        arch|manjaro|endeavouros|blackarch)
+            # Initialize PostgreSQL database if not already done
+            if [ ! -d "/var/lib/postgres/data" ]; then
+                sudo -u postgres initdb -D /var/lib/postgres/data
+            fi
+            sudo systemctl start postgresql
+            sudo systemctl start redis
+            ;;
+        debian|ubuntu|linuxmint|pop|fedora|rhel|centos|rocky|almalinux)
+            sudo systemctl start postgresql
+            sudo systemctl start redis
+            ;;
+    esac
+elif [[ "$OS" == "macos" ]]; then
     brew services start postgresql
     brew services start redis
 fi

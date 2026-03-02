@@ -3,17 +3,19 @@ use crate::cache::cache::Cache;
 use crate::cache::keys::quote::QuoteKey;
 use crate::chains::stellar::client::StellarClient;
 use crate::chains::stellar::types::is_valid_stellar_address;
-use crate::error::{AppError, AppErrorKind, DomainError, ExternalError, ValidationError};
+use crate::error::{
+    AppError, AppErrorKind, DomainError, ExternalError, InfrastructureError, ValidationError,
+};
 use crate::services::exchange_rate::{
     ConversionDirection, ConversionRequest, ExchangeRateService,
 };
 use crate::services::fee_calculation::FeeCalculationService;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use chrono::{Duration, Utc};
-use serde_json::json;
+use chrono::{Duration as ChronoDuration, Utc};
 use sqlx::types::BigDecimal;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -26,7 +28,7 @@ const CNGN_ISSUER: &str = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 /// Application state for the quote handler
 #[derive(Clone)]
 pub struct QuoteHandlerState {
-    pub cache: Arc<dyn Cache>,
+    pub cache: Arc<dyn Cache<StoredQuote> + Send + Sync>,
     pub stellar_client: Arc<StellarClient>,
     pub exchange_rate_service: Arc<ExchangeRateService>,
     pub fee_service: Arc<FeeCalculationService>,
@@ -58,27 +60,22 @@ pub async fn create_quote(
 
     let conversion_result = state
         .exchange_rate_service
-        .calculate_conversion(&conversion_request)
+        .calculate_conversion(conversion_request)
         .await
         .map_err(|e| {
             error!("Failed to fetch exchange rate: {}", e);
-            AppError::new(
-                AppErrorKind::External(ExternalError::Timeout {
-                    service: "rate_service".to_string(),
-                    timeout_secs: 30,
-                }),
-                "Exchange rate service is temporarily unavailable. Please try again.".to_string(),
-            )
-            .with_status_code(StatusCode::SERVICE_UNAVAILABLE)
-            .with_retryable(true)
-            .with_details(json!({
-                "retry_after": 30
+            AppError::new(AppErrorKind::External(ExternalError::Timeout {
+                service: "rate_service".to_string(),
+                timeout_secs: 30,
             }))
         })?;
 
     let rate = BigDecimal::from_str(&conversion_result.base_rate).map_err(|e| {
         error!("Invalid rate format: {}", e);
-        AppError::internal_error("Invalid rate format".to_string())
+        AppError::new(AppErrorKind::External(ExternalError::Blockchain {
+            message: "Invalid rate format returned by rate service".to_string(),
+            is_retryable: false,
+        }))
     })?;
 
     // 3. Calculate gross cNGN
@@ -91,7 +88,10 @@ pub async fn create_quote(
         .await
         .map_err(|e| {
             error!("Failed to calculate fees: {}", e);
-            AppError::internal_error("Failed to calculate fees".to_string())
+            AppError::new(AppErrorKind::Infrastructure(InfrastructureError::Database {
+                message: "Failed to calculate fees".to_string(),
+                is_retryable: true,
+            }))
         })?;
 
     // Extract fee amounts
@@ -135,18 +135,10 @@ pub async fn create_quote(
             requested_cngn = %net_cngn,
             "Insufficient cNGN liquidity"
         );
-        return Err(AppError::new(
-            AppErrorKind::Domain(DomainError::InvalidAmount {
+        return Err(AppError::new(AppErrorKind::Domain(DomainError::InvalidAmount {
                 amount: net_cngn.to_string(),
                 reason: "Insufficient cNGN liquidity available".to_string(),
-            }),
-            "Insufficient cNGN liquidity for this amount. Try a smaller amount or check back shortly.".to_string(),
-        )
-        .with_status_code(StatusCode::UNPROCESSABLE_ENTITY)
-        .with_details(json!({
-            "code": "INSUFFICIENT_LIQUIDITY",
-            "requested_cngn": net_cngn.to_string()
-        })));
+            })));
     }
 
     // 6. Check cNGN trustline
@@ -155,7 +147,7 @@ pub async fn create_quote(
     // 7. Generate quote_id and build quote
     let quote_id = Uuid::new_v4();
     let created_at = Utc::now();
-    let expires_at = created_at + Duration::seconds(QUOTE_TTL_SECONDS);
+    let expires_at = created_at + ChronoDuration::seconds(QUOTE_TTL_SECONDS);
     let expires_in_seconds = QUOTE_TTL_SECONDS;
 
     let fees = QuoteFeeBreakdown {
@@ -184,18 +176,19 @@ pub async fn create_quote(
 
     // 8. Persist quote to Redis
     let quote_key = QuoteKey::new(quote_id.to_string());
-    let quote_json = serde_json::to_string(&stored_quote).map_err(|e| {
-        error!("Failed to serialize quote: {}", e);
-        AppError::internal_error("Failed to create quote".to_string())
-    })?;
-
     state
         .cache
-        .set(&quote_key.to_string(), &quote_json, Some(QUOTE_TTL_SECONDS as u64))
+        .set(
+            &quote_key.to_string(),
+            &stored_quote,
+            Some(Duration::from_secs(QUOTE_TTL_SECONDS as u64)),
+        )
         .await
         .map_err(|e| {
             error!("Failed to store quote in Redis: {}", e);
-            AppError::internal_error("Failed to store quote".to_string())
+            AppError::new(AppErrorKind::Infrastructure(InfrastructureError::Cache {
+                message: "Failed to store quote".to_string(),
+            }))
         })?;
 
     info!(
@@ -235,79 +228,43 @@ pub async fn create_quote(
 fn validate_quote_request(request: &OnrampQuoteRequest) -> Result<(), AppError> {
     // Validate amount range
     let amount_i64 = request.amount_ngn.to_string().parse::<f64>().map_err(|_| {
-        AppError::new(
-            AppErrorKind::Validation(ValidationError::InvalidAmount {
-                amount: request.amount_ngn.to_string(),
-                reason: "Invalid amount format".to_string(),
-            }),
-            "Amount must be a valid number".to_string(),
-        )
-        .with_status_code(StatusCode::BAD_REQUEST)
+        AppError::new(AppErrorKind::Validation(ValidationError::InvalidAmount {
+            amount: request.amount_ngn.to_string(),
+            reason: "Invalid amount format".to_string(),
+        }))
     })?;
 
     if amount_i64 < MIN_AMOUNT_NGN as f64 {
-        return Err(AppError::new(
-            AppErrorKind::Validation(ValidationError::OutOfRange {
+        return Err(AppError::new(AppErrorKind::Validation(ValidationError::OutOfRange {
                 field: "amount_ngn".to_string(),
                 min: Some(MIN_AMOUNT_NGN.to_string()),
                 max: Some(MAX_AMOUNT_NGN.to_string()),
-            }),
-            format!("Minimum onramp amount is ₦{:,}.", MIN_AMOUNT_NGN),
-        )
-        .with_status_code(StatusCode::BAD_REQUEST)
-        .with_details(json!({
-            "code": "AMOUNT_TOO_LOW",
-            "minimum_amount_ngn": MIN_AMOUNT_NGN
-        })));
+            })));
     }
 
     if amount_i64 > MAX_AMOUNT_NGN as f64 {
-        return Err(AppError::new(
-            AppErrorKind::Validation(ValidationError::OutOfRange {
+        return Err(AppError::new(AppErrorKind::Validation(ValidationError::OutOfRange {
                 field: "amount_ngn".to_string(),
                 min: Some(MIN_AMOUNT_NGN.to_string()),
                 max: Some(MAX_AMOUNT_NGN.to_string()),
-            }),
-            format!("Maximum onramp amount is ₦{:,} per transaction.", MAX_AMOUNT_NGN),
-        )
-        .with_status_code(StatusCode::BAD_REQUEST)
-        .with_details(json!({
-            "code": "AMOUNT_TOO_HIGH",
-            "maximum_amount_ngn": MAX_AMOUNT_NGN
-        })));
+            })));
     }
 
     // Validate wallet address
     if !is_valid_stellar_address(&request.wallet_address) {
-        return Err(AppError::new(
-            AppErrorKind::Validation(ValidationError::InvalidWalletAddress {
+        return Err(AppError::new(AppErrorKind::Validation(ValidationError::InvalidWalletAddress {
                 address: request.wallet_address.clone(),
                 reason: "Not a valid Stellar public key".to_string(),
-            }),
-            "Wallet address is not a valid Stellar public key.".to_string(),
-        )
-        .with_status_code(StatusCode::BAD_REQUEST)
-        .with_details(json!({
-            "code": "INVALID_WALLET",
-            "provided": request.wallet_address
-        })));
+            })));
     }
 
     // Validate provider
     let valid_providers = ["flutterwave", "paystack", "mpesa"];
     if !valid_providers.contains(&request.provider.to_lowercase().as_str()) {
-        return Err(AppError::new(
-            AppErrorKind::Validation(ValidationError::InvalidCurrency {
+        return Err(AppError::new(AppErrorKind::Validation(ValidationError::InvalidCurrency {
                 currency: request.provider.clone(),
                 reason: "Unsupported provider".to_string(),
-            }),
-            format!("Provider '{}' is not supported.", request.provider),
-        )
-        .with_status_code(StatusCode::BAD_REQUEST)
-        .with_details(json!({
-            "code": "INVALID_PROVIDER",
-            "supported_providers": valid_providers
-        })));
+            })));
     }
 
     Ok(())
@@ -315,7 +272,7 @@ fn validate_quote_request(request: &OnrampQuoteRequest) -> Result<(), AppError> 
 
 /// Check cNGN liquidity on Stellar
 async fn check_cngn_liquidity(
-    stellar_client: &Arc<StellarClient>,
+    _stellar_client: &Arc<StellarClient>,
     amount: &BigDecimal,
 ) -> Result<bool, AppError> {
     // TODO: Implement actual liquidity check via Stellar SDK

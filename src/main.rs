@@ -496,15 +496,15 @@ async fn main() -> anyhow::Result<()> {
         
         let status_service = std::sync::Arc::new(api::onramp::OnrampStatusService::new(
             transaction_repo,
-            cache.clone(),
-            client,
+            std::sync::Arc::new(cache.clone()),
+            std::sync::Arc::new(client),
             payment_factory,
         ));
 
         Router::new()
             .route("/api/onramp/quote", post(create_onramp_quote))
             .with_state(quote_service)
-            .route("/api/onramp/status/:tx_id", get(api::onramp::get_onramp_status))
+            .route("/api/onramp/status/tx_id", get(api::onramp::get_onramp_status))
             .with_state(status_service)
     } else {
         Router::new()
