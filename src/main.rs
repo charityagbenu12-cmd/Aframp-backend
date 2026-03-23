@@ -377,6 +377,53 @@ async fn main() -> anyhow::Result<()> {
         info!("Offramp processor worker disabled (OFFRAMP_PROCESSOR_ENABLED=false)");
     }
 
+    // Start Payment Poller Worker
+    let poller_enabled = std::env::var("PAYMENT_POLLER_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        != "false";
+    if poller_enabled {
+        if let (Some(pool), Some(factory)) = (db_pool.clone(), provider_factory.clone()) {
+            let poller_config = workers::payment_poller::PaymentPollerConfig::from_env();
+            info!(
+                interval_secs = poller_config.poll_interval.as_secs(),
+                max_retries = poller_config.max_retries,
+                "Starting payment poller worker"
+            );
+            let tx_repo = std::sync::Arc::new(
+                database::transaction_repository::TransactionRepository::new(pool.clone()),
+            );
+            let mut poller_providers = Vec::new();
+            for provider_name in factory.list_available_providers() {
+                if let Ok(p) = factory.get_provider(provider_name) {
+                    poller_providers.push(
+                        std::sync::Arc::from(p)
+                            as std::sync::Arc<dyn payments::provider::PaymentProvider>,
+                    );
+                }
+            }
+            let poller_orchestrator = std::sync::Arc::new(
+                services::payment_orchestrator::PaymentOrchestrator::new(
+                    poller_providers,
+                    tx_repo,
+                    services::payment_orchestrator::OrchestratorConfig::default(),
+                ),
+            );
+            let poller = workers::payment_poller::PaymentPollerWorker::new(
+                pool,
+                factory,
+                poller_orchestrator,
+                poller_config,
+            );
+            tokio::spawn(poller.run(worker_shutdown_rx.clone()));
+            info!("✅ Payment poller worker started");
+        } else {
+            info!("⏭️  Skipping payment poller worker (missing db pool or provider factory)");
+        }
+    } else {
+        info!("Payment poller worker disabled (PAYMENT_POLLER_ENABLED=false)");
+    }
+
     // Initialize webhook processor and retry worker
     let webhook_routes = if let Some(pool) = db_pool.clone() {
         let webhook_repo = std::sync::Arc::new(
