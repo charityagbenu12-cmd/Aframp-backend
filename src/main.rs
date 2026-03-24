@@ -527,18 +527,51 @@ async fn main() -> anyhow::Result<()> {
                 panic!("Cannot start without payment providers");
             }));
         
+        let stellar_client_arc = std::sync::Arc::new(client);
+
         let status_service = std::sync::Arc::new(api::onramp::OnrampStatusService::new(
-            transaction_repo,
+            transaction_repo.clone(),
             std::sync::Arc::new(cache.clone()),
-            std::sync::Arc::new(client),
-            payment_factory,
+            stellar_client_arc.clone(),
+            payment_factory.clone(),
         ));
+
+        let cngn_issuer_for_initiate = std::env::var("CNGN_ISSUER_ADDRESS")
+            .or_else(|_| std::env::var("CNGN_ISSUER_MAINNET"))
+            .unwrap_or_else(|_| "GXXXXDEFAULTISSUERXXXX".to_string());
+
+        // Build orchestrator for initiate endpoint (#20)
+        let mut onramp_providers = Vec::new();
+        for provider_name in payment_factory.list_available_providers() {
+            if let Ok(p) = payment_factory.get_provider(provider_name) {
+                onramp_providers.push(
+                    std::sync::Arc::from(p) as std::sync::Arc<dyn payments::provider::PaymentProvider>,
+                );
+            }
+        }
+        let onramp_orchestrator = std::sync::Arc::new(
+            services::payment_orchestrator::PaymentOrchestrator::new(
+                onramp_providers,
+                transaction_repo.clone(),
+                services::payment_orchestrator::OrchestratorConfig::from_env(),
+            ),
+        );
+
+        let initiate_state = std::sync::Arc::new(api::onramp::OnrampInitiateState {
+            transaction_repo,
+            cache: std::sync::Arc::new(cache.clone()),
+            stellar_client: stellar_client_arc,
+            orchestrator: onramp_orchestrator,
+            cngn_issuer: cngn_issuer_for_initiate,
+        });
 
         Router::new()
             .route("/api/onramp/quote", post(create_onramp_quote))
             .with_state(quote_service)
             .route("/api/onramp/status/tx_id", get(api::onramp::get_onramp_status))
             .with_state(status_service)
+            .route("/api/onramp/initiate", post(api::onramp::initiate_onramp))
+            .with_state(initiate_state)
     } else {
         Router::new()
     };
