@@ -9,7 +9,7 @@ pub struct RefundHandler;
 impl RefundHandler {
     /// Process a cNGN refund to the user's wallet
     pub async fn process_refund(
-        stellar_client: &StellarClient,
+        _stellar_client: &StellarClient,
         transaction_id: Uuid,
         wallet_address: &str,
         amount: f64,
@@ -24,7 +24,7 @@ impl RefundHandler {
         );
 
         // Build refund memo
-        let memo = format!("REFUND-{}", transaction_id);
+        let _memo = format!("REFUND-{}", transaction_id);
 
         // Create refund transaction
         // This would normally call stellar_client to build and submit the transaction

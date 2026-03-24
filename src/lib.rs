@@ -55,6 +55,10 @@ pub mod health;
 #[cfg(feature = "database")]
 pub mod workers;
 
+// Prometheus metrics
+#[cfg(feature = "database")]
+pub mod metrics;
+
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
 #[contracterror]

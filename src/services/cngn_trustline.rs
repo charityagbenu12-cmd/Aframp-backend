@@ -242,6 +242,9 @@ impl CngnTrustlineService {
         let status = self.check_trustline(account_id).await?;
         if status.exists {
             warn!(account_id = %account_id, "Trustline already exists");
+            crate::metrics::stellar::trustline_attempts_total()
+                .with_label_values(&["already_exists"])
+                .inc();
             return Err(AppError::new(AppErrorKind::Domain(
                 DomainError::DuplicateTransaction {
                     transaction_id: format!("trustline_{}", account_id),
@@ -250,7 +253,15 @@ impl CngnTrustlineService {
         }
 
         // Validate minimum balance
-        self.validate_min_balance(account_id).await?;
+        match self.validate_min_balance(account_id).await {
+            Ok(_) => {}
+            Err(e) => {
+                crate::metrics::stellar::trustline_attempts_total()
+                    .with_label_values(&["failed"])
+                    .inc();
+                return Err(e);
+            }
+        }
 
         // Calculate minimum balance requirement
         let account_info = self
@@ -278,6 +289,10 @@ impl CngnTrustlineService {
             asset_code = %tx_details.asset_code,
             "Trustline transaction prepared"
         );
+
+        crate::metrics::stellar::trustline_attempts_total()
+            .with_label_values(&["success"])
+            .inc();
 
         Ok(tx_details)
     }

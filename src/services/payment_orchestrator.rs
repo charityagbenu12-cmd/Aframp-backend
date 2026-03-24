@@ -744,6 +744,7 @@ impl PaymentOrchestrator {
             ProviderName::Flutterwave => BigDecimal::from(14), // 1.4%
             ProviderName::Paystack => BigDecimal::from(15),    // 1.5%
             ProviderName::Mpesa => BigDecimal::from(20),       // 2.0%
+            ProviderName::Mock => BigDecimal::from(10),        // 1.0%
         };
 
         amount * rate / BigDecimal::from(1000)
@@ -1016,17 +1017,27 @@ impl PaymentOrchestrator {
         provider: &dyn PaymentProvider,
         request: PaymentRequest,
     ) -> OrchestratorResult<PaymentResponse> {
+        let provider_name = provider.name().as_str().to_string();
         let mut attempt = 0;
         let mut last_error: Option<OrchestratorError> = None;
 
         while attempt < self.config.max_retry_attempts {
             attempt += 1;
 
+            let _timer = crate::metrics::payment::provider_request_duration_seconds()
+                .with_label_values(&[&provider_name, "initiate"])
+                .start_timer();
+            crate::metrics::payment::provider_requests_total()
+                .with_label_values(&[&provider_name, "initiate"])
+                .inc();
+
             match provider.initiate_payment(request.clone()).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
+                    crate::metrics::payment::provider_failures_total()
+                        .with_label_values(&[&provider_name, &e.to_string()])
+                        .inc();
                     if !e.is_retryable() {
-                        // Non-retryable error, fail immediately
                         return Err(OrchestratorError::AllProvidersFailed {
                             errors: vec![e.to_string()],
                         });
@@ -1036,7 +1047,6 @@ impl PaymentOrchestrator {
                         errors: vec![e.to_string()],
                     });
 
-                    // Calculate delay with exponential backoff
                     if attempt < self.config.max_retry_attempts {
                         let delay = self.calculate_retry_delay(attempt);
                         warn!(
@@ -1101,11 +1111,23 @@ impl PaymentOrchestrator {
             provider_reference: provider_reference.map(String::from),
         };
 
-        let response = provider.verify_payment(status_request).await.map_err(|e| {
-            OrchestratorError::AllProvidersFailed {
-                errors: vec![e.to_string()],
-            }
-        })?;
+        let response = {
+            let pname = provider_name.as_str().to_string();
+            let _timer = crate::metrics::payment::provider_request_duration_seconds()
+                .with_label_values(&[&pname, "verify"])
+                .start_timer();
+            crate::metrics::payment::provider_requests_total()
+                .with_label_values(&[&pname, "verify"])
+                .inc();
+            provider.verify_payment(status_request).await.map_err(|e| {
+                crate::metrics::payment::provider_failures_total()
+                    .with_label_values(&[&pname, &e.to_string()])
+                    .inc();
+                OrchestratorError::AllProvidersFailed {
+                    errors: vec![e.to_string()],
+                }
+            })?
+        };
 
         info!(
             transaction_id = %transaction_reference,

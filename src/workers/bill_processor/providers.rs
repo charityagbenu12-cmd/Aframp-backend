@@ -513,8 +513,51 @@ impl BillPaymentProvider for PaystackAdapter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Provider Factory
+// ---------------------------------------------------------------------------
+
+pub struct BillProviderFactory {
+    flutterwave: FlutterwaveAdapter,
+    vtpass: VTPassAdapter,
+    paystack: PaystackAdapter,
+}
+
+impl BillProviderFactory {
+    pub fn from_env() -> Result<Self, ProcessingError> {
+        let flw_key = std::env::var("FLUTTERWAVE_SECRET_KEY").unwrap_or_default();
+        let flw_url = std::env::var("FLUTTERWAVE_BASE_URL")
+            .unwrap_or_else(|_| "https://api.flutterwave.com".to_string());
+
+        let vt_key = std::env::var("VTPASS_API_KEY").unwrap_or_default();
+        let vt_secret = std::env::var("VTPASS_SECRET_KEY").unwrap_or_default();
+        let vt_url = std::env::var("VTPASS_BASE_URL")
+            .unwrap_or_else(|_| "https://api.vtpass.com".to_string());
+
+        let ps_key = std::env::var("PAYSTACK_SECRET_KEY").unwrap_or_default();
+        let ps_url = std::env::var("PAYSTACK_BASE_URL")
+            .unwrap_or_else(|_| "https://api.paystack.co".to_string());
+
+        Ok(Self {
+            flutterwave: FlutterwaveAdapter::new(flw_key, flw_url)?,
+            vtpass: VTPassAdapter::new(vt_key, vt_secret, vt_url)?,
+            paystack: PaystackAdapter::new(ps_key, ps_url)?,
+        })
+    }
+
+    pub fn get_provider(&self, name: &str) -> &dyn BillPaymentProvider {
+        match name.to_lowercase().as_str() {
+            "flutterwave" => &self.flutterwave,
+            "vtpass" => &self.vtpass,
+            "paystack" => &self.paystack,
+            _ => &self.vtpass, // Default to VTPass
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

@@ -81,6 +81,9 @@ impl RedisCache {
 #[async_trait]
 impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> Cache<T> for RedisCache {
     async fn get(&self, key: &str) -> CacheResult<Option<T>> {
+        let _timer = crate::metrics::cache::operation_duration_seconds()
+            .with_label_values(&["get"])
+            .start_timer();
         let mut conn = match self.get_connection().await {
             Ok(conn) => conn,
             Err(_) => return Ok(None), // Graceful degradation
@@ -100,16 +103,25 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> Cache<T> for Redis
                     })
                     .unwrap();
                 debug!("Cache hit for key: {}", key);
+                crate::metrics::cache::hits_total()
+                    .with_label_values(&[crate::metrics::key_prefix(key)])
+                    .inc();
                 Ok(Some(value))
             }
             None => {
                 debug!("Cache miss for key: {}", key);
+                crate::metrics::cache::misses_total()
+                    .with_label_values(&[crate::metrics::key_prefix(key)])
+                    .inc();
                 Ok(None)
             }
         }
     }
 
     async fn set(&self, key: &str, value: &T, ttl: Option<Duration>) -> CacheResult<()> {
+        let _timer = crate::metrics::cache::operation_duration_seconds()
+            .with_label_values(&["set"])
+            .start_timer();
         let mut conn = match self.get_connection().await {
             Ok(conn) => conn,
             Err(_) => return Ok(()), // Graceful degradation - don't fail
@@ -144,6 +156,9 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> Cache<T> for Redis
     }
 
     async fn delete(&self, key: &str) -> CacheResult<bool> {
+        let _timer = crate::metrics::cache::operation_duration_seconds()
+            .with_label_values(&["delete"])
+            .start_timer();
         let mut conn = match self.get_connection().await {
             Ok(conn) => conn,
             Err(_) => return Ok(false), // Graceful degradation

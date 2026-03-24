@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub cache: CacheConfig,
     pub logging: LoggingConfig,
     pub stellar: StellarConfig,
+    /// Distributed tracing configuration (Issue #104 — OpenTelemetry).
+    pub telemetry: TelemetryConfig,
 }
 
 /// Server configuration
@@ -64,6 +66,113 @@ pub struct StellarConfig {
     pub health_check_interval: u64, // seconds
 }
 
+// ---------------------------------------------------------------------------
+// Telemetry configuration  (Issue #104 — Distributed Tracing)
+// ---------------------------------------------------------------------------
+
+/// OpenTelemetry / distributed-tracing configuration.
+///
+/// All fields are loaded from environment variables so the tracing backend,
+/// service name, environment tag, and sampling rate can be changed without
+/// recompiling the binary.
+///
+/// Environment variables
+/// ─────────────────────
+/// | Variable                        | Default                   | Description                                          |
+/// |---------------------------------|---------------------------|------------------------------------------------------|
+/// | `OTEL_SERVICE_NAME`             | `"aframp-backend"`        | Service name emitted in every span.                  |
+/// | `APP_ENV`                       | `"development"`           | Deployment environment tag on every span.            |
+/// | `OTEL_SAMPLING_RATE`            | `1.0`                     | Fraction of root spans sampled (0.0 – 1.0).          |
+/// | `OTEL_EXPORTER_OTLP_ENDPOINT`   | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector (Jaeger / Tempo).|
+#[derive(Debug, Clone)]
+pub struct TelemetryConfig {
+    /// Human-readable service name attached to every exported span as
+    /// the `service.name` resource attribute.
+    pub service_name: String,
+
+    /// Deployment environment (e.g. `"development"`, `"staging"`, `"production"`).
+    /// Attached to every span as the `deployment.environment` resource attribute.
+    pub environment: String,
+
+    /// Fraction of root spans to sample (0.0 = none, 1.0 = all).
+    ///
+    /// Child spans always inherit the sampling decision of their parent, so a
+    /// trace is never split mid-flight.  Error traces are always exported
+    /// regardless of this value — the SDK uses `ParentBased(AlwaysOn)` when
+    /// the rate is 1.0 and `ParentBased(TraceIdRatioBased(rate))` otherwise.
+    ///
+    /// For production, start at `0.1` (10 %) and tune based on volume.
+    pub sampling_rate: f64,
+
+    /// OTLP gRPC collector endpoint.
+    ///
+    /// Typical values:
+    /// * Jaeger all-in-one:          `http://localhost:4317`
+    /// * Grafana Agent / Tempo:      `http://localhost:4317`
+    /// * OpenTelemetry Collector:    `http://otel-collector:4317`
+    pub otlp_endpoint: String,
+}
+
+impl TelemetryConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(TelemetryConfig {
+            service_name: env::var("OTEL_SERVICE_NAME")
+                .unwrap_or_else(|_| "aframp-backend".to_string()),
+
+            environment: env::var("APP_ENV")
+                .unwrap_or_else(|_| "development".to_string()),
+
+            sampling_rate: env::var("OTEL_SAMPLING_RATE")
+                .unwrap_or_else(|_| "1.0".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("OTEL_SAMPLING_RATE".to_string()))?,
+
+            otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // Sampling rate must be in [0.0, 1.0].
+        if !(0.0..=1.0).contains(&self.sampling_rate) {
+            return Err(ConfigError::InvalidValue(
+                "OTEL_SAMPLING_RATE must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+
+        // Service name must not be blank.
+        if self.service_name.trim().is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "OTEL_SERVICE_NAME cannot be empty".to_string(),
+            ));
+        }
+
+        // OTLP endpoint must look like an HTTP/HTTPS URL.
+        if !self.otlp_endpoint.starts_with("http://")
+            && !self.otlp_endpoint.starts_with("https://")
+        {
+            return Err(ConfigError::InvalidValue(
+                "OTEL_EXPORTER_OTLP_ENDPOINT must start with http:// or https://".to_string(),
+            ));
+        }
+
+        // APP_ENV must be one of the known deployment tiers.
+        let valid_envs = ["development", "staging", "production", "test"];
+        if !valid_envs.contains(&self.environment.as_str()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "APP_ENV must be one of: {}",
+                valid_envs.join(", ")
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AppConfig
+// ---------------------------------------------------------------------------
+
 impl AppConfig {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -76,6 +185,7 @@ impl AppConfig {
             cache: CacheConfig::from_env()?,
             logging: LoggingConfig::from_env()?,
             stellar: StellarConfig::from_env()?,
+            telemetry: TelemetryConfig::from_env()?,
         })
     }
 
@@ -85,10 +195,15 @@ impl AppConfig {
         self.database.validate()?;
         self.cache.validate()?;
         self.stellar.validate()?;
+        self.telemetry.validate()?;
 
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Existing config impls (unchanged)
+// ---------------------------------------------------------------------------
 
 impl ServerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -281,6 +396,10 @@ impl StellarConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Error types (unchanged)
+// ---------------------------------------------------------------------------
+
 /// Configuration error types
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -306,9 +425,15 @@ impl From<std::num::ParseFloatError> for ConfigError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── existing tests (unchanged) ──────────────────────────────────────────
 
     #[test]
     fn test_server_config_validation() {
@@ -341,5 +466,153 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    // ── TelemetryConfig tests (Issue #104) ──────────────────────────────────
+
+    fn valid_telemetry_config() -> TelemetryConfig {
+        TelemetryConfig {
+            service_name: "aframp-backend".to_string(),
+            environment: "development".to_string(),
+            sampling_rate: 1.0,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_telemetry_config_valid_defaults() {
+        assert!(valid_telemetry_config().validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_sampling_rate_boundaries() {
+        // 0.0 (sample nothing) is valid.
+        let cfg = TelemetryConfig { sampling_rate: 0.0, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_ok());
+
+        // 1.0 (sample everything) is valid.
+        let cfg = TelemetryConfig { sampling_rate: 1.0, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_ok());
+
+        // 0.25 (25 %) is valid.
+        let cfg = TelemetryConfig { sampling_rate: 0.25, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_sampling_rate_out_of_range() {
+        // Above 1.0 must fail.
+        let cfg = TelemetryConfig { sampling_rate: 1.1, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_err());
+
+        // Negative must fail.
+        let cfg = TelemetryConfig { sampling_rate: -0.1, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_empty_service_name() {
+        let cfg = TelemetryConfig {
+            service_name: "  ".to_string(), // whitespace only
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_invalid_otlp_endpoint() {
+        // No scheme at all.
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "localhost:4317".to_string(),
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+
+        // Wrong scheme.
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "grpc://localhost:4317".to_string(),
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_https_otlp_endpoint_is_valid() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "https://otel-collector.example.com:4317".to_string(),
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_invalid_environment() {
+        let cfg = TelemetryConfig {
+            environment: "local".to_string(), // not in the allowed list
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_all_valid_environments() {
+        for env_name in &["development", "staging", "production", "test"] {
+            let cfg = TelemetryConfig {
+                environment: env_name.to_string(),
+                ..valid_telemetry_config()
+            };
+            assert!(
+                cfg.validate().is_ok(),
+                "environment '{}' should be valid",
+                env_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_telemetry_env_var_defaults() {
+        // Remove all four OTel env vars so defaults are exercised.
+        std::env::remove_var("OTEL_SERVICE_NAME");
+        std::env::remove_var("APP_ENV");
+        std::env::remove_var("OTEL_SAMPLING_RATE");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+
+        let cfg = TelemetryConfig::from_env().expect("should load from defaults");
+
+        assert_eq!(cfg.service_name, "aframp-backend");
+        assert_eq!(cfg.environment, "development");
+        assert!((cfg.sampling_rate - 1.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.otlp_endpoint, "http://localhost:4317");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_env_var_overrides() {
+        std::env::set_var("OTEL_SERVICE_NAME", "payment-worker");
+        std::env::set_var("APP_ENV", "production");
+        std::env::set_var("OTEL_SAMPLING_RATE", "0.1");
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317");
+
+        let cfg = TelemetryConfig::from_env().expect("should load from env vars");
+
+        assert_eq!(cfg.service_name, "payment-worker");
+        assert_eq!(cfg.environment, "production");
+        assert!((cfg.sampling_rate - 0.1).abs() < f64::EPSILON);
+        assert_eq!(cfg.otlp_endpoint, "http://otel-collector:4317");
+        assert!(cfg.validate().is_ok());
+
+        // Clean up so other tests are not affected.
+        std::env::remove_var("OTEL_SERVICE_NAME");
+        std::env::remove_var("APP_ENV");
+        std::env::remove_var("OTEL_SAMPLING_RATE");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+    }
+
+    #[test]
+    fn test_telemetry_invalid_sampling_rate_env_var() {
+        std::env::set_var("OTEL_SAMPLING_RATE", "not-a-number");
+        let result = TelemetryConfig::from_env();
+        assert!(result.is_err());
+        std::env::remove_var("OTEL_SAMPLING_RATE");
     }
 }

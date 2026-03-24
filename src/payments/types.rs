@@ -10,6 +10,7 @@ pub enum ProviderName {
     Paystack,
     Flutterwave,
     Mpesa,
+    Mock,
 }
 
 impl ProviderName {
@@ -18,6 +19,7 @@ impl ProviderName {
             ProviderName::Paystack => "paystack",
             ProviderName::Flutterwave => "flutterwave",
             ProviderName::Mpesa => "mpesa",
+            ProviderName::Mock => "mock",
         }
     }
 }
@@ -36,6 +38,7 @@ impl FromStr for ProviderName {
             "paystack" => Ok(ProviderName::Paystack),
             "flutterwave" => Ok(ProviderName::Flutterwave),
             "mpesa" | "m-pesa" => Ok(ProviderName::Mpesa),
+            "mock" => Ok(ProviderName::Mock),
             _ => Err(PaymentError::ValidationError {
                 message: format!("unsupported provider: {}", value),
                 field: Some("provider".to_string()),

@@ -6,63 +6,168 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# ---------------------------------------------------------------------------
+# Feature flags
+# ---------------------------------------------------------------------------
+# "telemetry" is a new feature that gates every OpenTelemetry crate.
+# It depends on "database" so that tracing spans over DB / Redis are only
+# compiled when the DB layer itself is compiled in.
+#
+# Dependency chain:
+#   cache  →  database  →  (core app deps)
+#   telemetry  →  database
+# ---------------------------------------------------------------------------
 [features]
 default = ["database", "cache"]
-database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr" ]
+database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:jsonwebtoken" ]
+database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui" ]
 cache = ["dep:redis", "dep:bb8", "dep:bb8-redis", "database"]
 
+# Distributed tracing via OpenTelemetry (Issue #104).
+# Enables OTLP export to Jaeger / Grafana Tempo, W3C trace-context propagation,
+# and the tracing-opentelemetry bridge layer.
+telemetry = [
+    "database",                          # needs tracing + tracing-subscriber from database feature
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-semantic-conventions",
+    "dep:opentelemetry-http",
+    "dep:tracing-opentelemetry",
+    # tower-http "trace" feature is already enabled via the database feature;
+    # listed here for documentation clarity.
+]
+
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
 [dependencies]
+
+# --- Soroban / Stellar smart-contract SDK (always required) ---
 soroban-sdk = "21.0.0"
-tokio = { version = "1.36", features = ["full"], optional = true }
-async-trait = { version = "0.1", optional = true }
-uuid = { version = "1.6", features = ["v4", "serde"], optional = true }
-chrono = { version = "0.4", features = ["serde"], optional = true }
-serde = { version = "1.0", features = ["derive"], optional = true }
-serde_json = { version = "1.0", optional = true }
-tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
-axum = { version = "0.8.8", optional = true }
-tower = { version = "0.4", features = ["util"], optional = true }
-tower-http = { version = "0.5", features = ["trace", "request-id"], optional = true }
-http = { version = "1.0", optional = true }
-sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "bigdecimal"], optional = true }
+stellar_sdk  = "0.1.4"
+stellar-strkey = { version = "0.0.16", optional = true }
+ed25519-dalek  = { version = "2.1.1",  optional = true }
+stellar-xdr    = { version = "25.0.0", features = ["next", "base64"], optional = true }
 
-# Stellar SDK dependencies (always required)
-stellar_sdk = "0.1.4"
-reqwest = { version = "0.13.1", features = ["json"] }
-config = "0.15.19"
-base64 = "0.22.1"
-anyhow = "1.0.100"
-thiserror = "2.0.18"
-regex = { version = "1.12.2", optional = true }
-bigdecimal = { version = "0.4", features = ["serde"], optional = true }
-rust_decimal = { version = "1.36", optional = true }
+# --- Web framework (optional, gated by "database" feature) ---
+axum       = { version = "0.8.8",  optional = true }
+tower      = { version = "0.4",    features = ["util"],                         optional = true }
+tower-http = { version = "0.5",    features = ["trace", "request-id", "cors"],  optional = true }
+http       = { version = "1.0",    optional = true }
 
-# Async runtime and utilities
-futures = "0.3.30"
+# --- Async runtime ---
+tokio      = { version = "1.36", features = ["full"],  optional = true }
+async-trait = { version = "0.1",                       optional = true }
+futures    = "0.3.30"
 
-# Redis dependencies for caching
-redis = { version = "1.0.2", features = ["tokio-comp", "connection-manager"], optional = true }
-bb8 = { version = "0.9.1", optional = true }
-bb8-redis = { version = "0.26.0", optional = true }
-dotenv = "0.15.0"
+# --- Serialisation ---
+serde      = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0",                        optional = true }
 
+# --- Database ---
+sqlx = {
+    version  = "0.8.6",
+    features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "bigdecimal"],
+    optional = true,
+}
 
-# Payment provider dependencies
+# --- Cache ---
+redis    = { version = "1.0.2",  features = ["tokio-comp", "connection-manager"], optional = true }
+bb8      = { version = "0.9.1",                                                    optional = true }
+bb8-redis = { version = "0.26.0",                                                  optional = true }
+
+# --- Types ---
+uuid        = { version = "1.6",  features = ["v4", "serde"],  optional = true }
+chrono      = { version = "0.4",  features = ["serde"],         optional = true }
+bigdecimal  = { version = "0.4",  features = ["serde"],         optional = true }
+rust_decimal = { version = "1.36",                              optional = true }
+regex       = { version = "1.12.2",                             optional = true }
+
+# --- Crypto / payment provider helpers ---
 hmac = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
-hex = { version = "0.4", optional = true }
-stellar-strkey = { version = "0.0.16", optional = true }
-ed25519-dalek = { version = "2.1.1", optional = true }
-stellar-xdr = { version = "25.0.0", features = ["next", "base64"], optional = true }
+hex  = { version = "0.4",  optional = true }
+
+# --- HTTP client (outbound calls — payment providers, Horizon, rate APIs) ---
+# reqwest 0.13 ships with a built-in connection pool and supports injecting
+# arbitrary headers, which is required for W3C traceparent injection.
+reqwest = { version = "0.13.1", features = ["json"] }
+
+# --- Config / environment ---
+config  = "0.15.19"
+dotenv  = "0.15.0"
+base64  = "0.22.1"
+
+# --- Error handling ---
+anyhow    = "1.0.100"
+thiserror = "2.0.18"
+
+# --- Nigerian bank account validation ---
 nuban = "1.1.0"
+jsonwebtoken = { version = "9.2.0", optional = true }
+serde_yaml = "0.9"
+prometheus = { version = "0.13", features = ["process"] }
 
+# OpenAPI / Swagger UI
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"], optional = true }
+utoipa-swagger-ui = { version = "8", features = ["axum"], optional = true }
 
+# Prometheus metrics
+prometheus = { version = "0.13", features = ["process"] }
 
+# ---------------------------------------------------------------------------
+# Tracing — base layer (optional via "database" feature)
+# ---------------------------------------------------------------------------
+# tracing and tracing-subscriber are gated by the "database" feature (already
+# present in the original Cargo.toml).  They are listed here with their full
+# feature sets so the JSON formatter and env-filter are always available when
+# the "database" feature is active.
+tracing            = { version = "0.1",  optional = true }
+tracing-subscriber = { version = "0.3",  features = ["json", "env-filter", "fmt"], optional = true }
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry — distributed tracing (Issue #104, gated by "telemetry" feature)
+# ---------------------------------------------------------------------------
+
+# Core API — defines Tracer, Span, Context, and the global provider interface.
+opentelemetry = { version = "0.22", features = ["trace"], optional = true }
+
+# SDK — TracerProvider, BatchSpanProcessor, samplers, ID generators.
+# The "rt-tokio" feature is required for the async batch exporter used with Tokio.
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio", "trace"], optional = true }
+
+# OTLP exporter — ships traces to Jaeger / Grafana Tempo / any OTLP backend.
+# "tonic" enables the gRPC transport; "grpc-tonic" wires it to the SDK pipeline.
+opentelemetry-otlp = { version = "0.15", features = ["tonic", "trace", "grpc-tonic"], optional = true }
+
+# Semantic conventions — standard span attribute keys (http.method, db.system, etc.)
+opentelemetry-semantic-conventions = { version = "0.14", optional = true }
+
+# HTTP helpers — Extractor / Injector traits for W3C traceparent header handling.
+opentelemetry-http = { version = "0.11", optional = true }
+
+# Bridge layer — connects `tracing` spans to the OpenTelemetry SDK so every
+# tracing::info_span! call is automatically exported as an OTLP span.
+tracing-opentelemetry = { version = "0.23", optional = true }
+
+# ---------------------------------------------------------------------------
+# Binaries
+# ---------------------------------------------------------------------------
 [[bin]]
 name = "Aframp-Backend"
 path = "src/main.rs"
 
+# ---------------------------------------------------------------------------
+# Integration test — trace context propagation (Issue #104)
+# ---------------------------------------------------------------------------
+[[test]]
+name = "tracing_integration"
+path = "tests/tracing_integration.rs"
+
+# ---------------------------------------------------------------------------
+# Dev dependencies
+# ---------------------------------------------------------------------------
 [dev-dependencies]
 soroban-sdk = { version = "25.0.1", features = ["testutils"] }
 tokio = { version = "1.49.0", features = ["full"] }
@@ -71,3 +176,5 @@ serde_json = "1.0"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+tokio       = { version = "1.49.0", features = ["full"] }
+tokio-test  = "0.4"

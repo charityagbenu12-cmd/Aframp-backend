@@ -176,6 +176,12 @@ impl TransactionMonitorWorker {
     }
 
     async fn run_cycle(&mut self) -> anyhow::Result<()> {
+        let _timer = crate::metrics::worker::cycle_duration_seconds()
+            .with_label_values(&["transaction_monitor"])
+            .start_timer();
+        crate::metrics::worker::cycles_total()
+            .with_label_values(&["transaction_monitor"])
+            .inc();
         self.process_pending_transactions().await?;
         self.scan_incoming_transactions().await?;
         Ok(())
@@ -434,13 +440,14 @@ impl TransactionMonitorWorker {
             }
 
             let tx_repo = TransactionRepository::new(self.pool.clone());
-            let (tx_id_str, is_offramp) = if memo.starts_with("WD-") {
-                (&memo[3..], true)
+            let (tx_id_str, is_offramp, is_bill) = if memo.starts_with("WD-") {
+                (&memo[3..], true, false)
+            } else if memo.starts_with("BILL-") {
+                (&memo[5..], false, true)
             } else {
-                (memo, false)
+                (memo, false, false)
             };
 
-            let tx_repo = TransactionRepository::new(self.pool.clone());
             match tx_repo.find_by_id(tx_id_str).await {
                 Ok(Some(db_tx)) => {
                     let is_pending = db_tx.status == "pending"
@@ -455,7 +462,7 @@ impl TransactionMonitorWorker {
                     metadata["incoming_ledger"] = json!(tx.ledger);
                     metadata["incoming_confirmed_at"] = json!(chrono::Utc::now().to_rfc3339());
 
-                    let next_status = if is_offramp || db_tx.r#type == "offramp" {
+                    let next_status = if is_offramp || is_bill || db_tx.r#type == "offramp" || db_tx.r#type == "bill_payment" {
                         "cngn_received"
                     } else {
                         "completed"
@@ -468,6 +475,21 @@ impl TransactionMonitorWorker {
                             metadata.clone(),
                         )
                         .await?;
+
+                    // If it's a bill payment, also update the bill_payments table status
+                    if is_bill || db_tx.r#type == "bill_payment" {
+                        use crate::database::bill_payment_repository::BillPaymentRepository;
+                        let bill_repo = BillPaymentRepository::new(self.pool.clone());
+                        if let Ok(Some(bill)) = bill_repo.find_by_transaction_id(db_tx.transaction_id).await {
+                            let _ = bill_repo.update_processing_status(
+                                bill.id,
+                                "cngn_received",
+                                None,
+                                None,
+                                None
+                            ).await;
+                        }
+                    }
 
                     // Also persist the confirmed hash to the dedicated column.
                     tx_repo
