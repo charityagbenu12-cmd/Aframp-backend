@@ -10,3 +10,4 @@ pub mod error;
 
 #[cfg(feature = "database")]
 pub mod metrics;
+pub mod api_key;
