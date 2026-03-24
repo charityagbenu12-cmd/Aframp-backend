@@ -24,8 +24,14 @@ pub mod oauth_token_validator;
 pub mod jwks_service;
 #[cfg(feature = "database")]
 pub mod token_limiter;
+#[cfg(feature = "database")]
+pub mod scope_catalog;
+#[cfg(feature = "database")]
+pub mod scope_hierarchy;
 #[cfg(test)]
 pub mod oauth_tests;
+#[cfg(test)]
+pub mod scope_tests;
 
 #[cfg(feature = "database")]
 pub use handlers::AuthHandlerState;
@@ -44,6 +50,10 @@ pub use oauth_token_validator::{OAuthTokenValidator, TokenValidationError, Valid
 pub use jwks_service::{JwksError, JwksKey, JwksService};
 #[cfg(feature = "database")]
 pub use token_limiter::{RateLimitConfig, RateLimitError, TokenRateLimiter};
+#[cfg(feature = "database")]
+pub use scope_catalog::{ScopeCatalog, ScopeCategory, ScopeDefinition};
+#[cfg(feature = "database")]
+pub use scope_hierarchy::ScopeHierarchy;
 
 #[cfg(feature = "database")]
 use axum::{routing::post, Router};
