@@ -1,6 +1,7 @@
 pub mod offramp_processor;
 pub mod transaction_monitor;
 pub mod webhook_retry;
+pub mod batch_processor;
 pub mod bill_processor {
     pub mod account_verification;
     pub mod payment_executor;

@@ -8,7 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["database", "cache"]
-database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr" ]
+database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui" ]
 cache = ["dep:redis", "dep:bb8", "dep:bb8-redis", "database"]
 
 [dependencies]
@@ -56,6 +56,10 @@ stellar-strkey = { version = "0.0.16", optional = true }
 ed25519-dalek = { version = "2.1.1", optional = true }
 stellar-xdr = { version = "25.0.0", features = ["next", "base64"], optional = true }
 nuban = "1.1.0"
+
+# OpenAPI / Swagger UI
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"], optional = true }
+utoipa-swagger-ui = { version = "8", features = ["axum"], optional = true }
 
 
 
