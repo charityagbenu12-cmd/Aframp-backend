@@ -10,6 +10,7 @@ mod health;
 mod logging;
 mod metrics;
 mod middleware;
+mod oauth;
 mod payments;
 mod recurring;
 mod services;
@@ -808,12 +809,24 @@ async fn main() -> anyhow::Result<()> {
             cngn_issuer: cngn_issuer_for_initiate,
         });
 
+        let onramp_integrity_state = crate::middleware::request_integrity::RequestIntegrityState {
+            endpoint: crate::middleware::request_integrity::IntegrityEndpoint::OnrampInitiate,
+            db: db_pool.clone().map(std::sync::Arc::new),
+            cache: Some(std::sync::Arc::new(cache.clone())),
+        };
+
         Router::new()
             .route("/api/onramp/quote", post(create_onramp_quote))
             .with_state(quote_service)
             .route("/api/onramp/status/tx_id", get(api::onramp::get_onramp_status))
             .with_state(status_service)
-            .route("/api/onramp/initiate", post(api::onramp::initiate_onramp))
+            .route(
+                "/api/onramp/initiate",
+                post(api::onramp::initiate_onramp).route_layer(axum::middleware::from_fn_with_state(
+                    onramp_integrity_state,
+                    crate::middleware::request_integrity::request_integrity_middleware,
+                )),
+            )
             .with_state(initiate_state)
     } else {
         Router::new()
@@ -946,8 +959,20 @@ async fn main() -> anyhow::Result<()> {
             cngn_issuer_address,
         };
 
+        let offramp_integrity_state = crate::middleware::request_integrity::RequestIntegrityState {
+            endpoint: crate::middleware::request_integrity::IntegrityEndpoint::OfframpInitiate,
+            db: Some(offramp_state.db_pool.clone()),
+            cache: Some(offramp_state.redis_cache.clone()),
+        };
+
         Router::new()
-            .route("/api/offramp/initiate", post(api::offramp::initiate_withdrawal))
+            .route(
+                "/api/offramp/initiate",
+                post(api::offramp::initiate_withdrawal).route_layer(axum::middleware::from_fn_with_state(
+                    offramp_integrity_state,
+                    crate::middleware::request_integrity::request_integrity_middleware,
+                )),
+            )
             .with_state(std::sync::Arc::new(offramp_state))
     } else {
         info!("⏭️  Skipping offramp routes (missing database or cache)");
@@ -1077,9 +1102,31 @@ async fn main() -> anyhow::Result<()> {
     // ── Batch transaction routes (Issue #125) ────────────────────────────────
     let batch_routes = if let Some(pool) = db_pool.clone() {
         let batch_state = api::batch::BatchState::new(std::sync::Arc::new(pool));
+        let batch_cngn_integrity_state = crate::middleware::request_integrity::RequestIntegrityState {
+            endpoint: crate::middleware::request_integrity::IntegrityEndpoint::BatchCngnTransfer,
+            db: Some(batch_state.db.clone()),
+            cache: redis_cache.clone().map(std::sync::Arc::new),
+        };
+        let batch_fiat_integrity_state = crate::middleware::request_integrity::RequestIntegrityState {
+            endpoint: crate::middleware::request_integrity::IntegrityEndpoint::BatchFiatPayout,
+            db: Some(batch_state.db.clone()),
+            cache: redis_cache.clone().map(std::sync::Arc::new),
+        };
         Router::new()
-            .route("/api/batch/cngn-transfer", post(api::batch::create_cngn_transfer_batch))
-            .route("/api/batch/fiat-payout",   post(api::batch::create_fiat_payout_batch))
+            .route(
+                "/api/batch/cngn-transfer",
+                post(api::batch::create_cngn_transfer_batch).route_layer(axum::middleware::from_fn_with_state(
+                    batch_cngn_integrity_state,
+                    crate::middleware::request_integrity::request_integrity_middleware,
+                )),
+            )
+            .route(
+                "/api/batch/fiat-payout",
+                post(api::batch::create_fiat_payout_batch).route_layer(axum::middleware::from_fn_with_state(
+                    batch_fiat_integrity_state,
+                    crate::middleware::request_integrity::request_integrity_middleware,
+                )),
+            )
             .route("/api/batch/{batch_id}",    get(api::batch::get_batch_status))
             .with_state(batch_state)
     } else {
@@ -1140,22 +1187,34 @@ async fn main() -> anyhow::Result<()> {
     // ── OpenAPI / Swagger UI (Issue #114) ────────────────────────────────────
     let openapi_routes = api::openapi::openapi_routes();
 
-    // Setup transaction history routes
-    let history_routes = if let Some(pool) = db_pool.clone() {
-        let history_state = std::sync::Arc::new(api::transaction_history::TransactionHistoryState {
-            pool: std::sync::Arc::new(pool),
-            cache: redis_cache.clone().map(std::sync::Arc::new),
-        });
-        Router::new()
-            .route("/api/transactions", get(api::transaction_history::get_transaction_history))
-            .route("/api/transactions/export", get(api::transaction_history::export_transaction_history))
-            .with_state(history_state)
+    // Setup OAuth 2.0 routes
+    let oauth_routes = if let (Some(pool), Some(cache)) = (db_pool.clone(), redis_cache.clone()) {
+        match oauth::RsaKeyPair::from_env() {
+            Ok(key_pair) => {
+                let issuer = std::env::var("OAUTH_ISSUER")
+                    .unwrap_or_else(|_| "https://api.aframp.com".to_string());
+                let is_production = std::env::var("ENVIRONMENT")
+                    .unwrap_or_default()
+                    .to_lowercase() == "production";
+                let oauth_state = std::sync::Arc::new(oauth::OAuthState {
+                    db_pool: pool,
+                    redis_cache: cache,
+                    key_pair: std::sync::Arc::new(key_pair),
+                    issuer,
+                    is_production,
+                });
+                info!("🔑 OAuth 2.0 routes enabled (RS256)");
+                oauth::oauth_router(oauth_state)
+            }
+            Err(e) => {
+                tracing::warn!("⏭️  Skipping OAuth routes: {}", e);
+                Router::new()
+            }
+        }
     } else {
-        info!("⏭️  Skipping transaction history routes (no database)");
+        info!("⏭️  Skipping OAuth routes (missing database or cache)");
         Router::new()
     };
-
-
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
@@ -1204,6 +1263,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(openapi_routes)
         .merge(recurring_routes)
         .merge(developer_routes)
+        .merge(oauth_routes)
         .merge(history_routes)
         .with_state(AppState {
             db_pool,
@@ -1254,10 +1314,21 @@ async fn main() -> anyhow::Result<()> {
     let app = if let Some(cache) = redis_cache.clone() {
 
         let rate_limit_state = crate::middleware::rate_limit::RateLimitState {
-            cache: std::sync::Arc::new(cache),
+            cache: std::sync::Arc::new(cache.clone()),
             config: rate_limit_config,
         };
-        app.layer(axum::middleware::from_fn_with_state(rate_limit_state, crate::middleware::rate_limit::rate_limit_middleware))
+
+        let replay_state = crate::middleware::replay_prevention::ReplayPreventionState {
+            redis: std::sync::Arc::new(cache.pool.clone()),
+            config: std::sync::Arc::new(crate::middleware::replay_prevention::ReplayConfig::from_env()),
+        };
+
+        app
+            .layer(axum::middleware::from_fn_with_state(
+                replay_state,
+                crate::middleware::replay_prevention::replay_prevention_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(rate_limit_state, crate::middleware::rate_limit::rate_limit_middleware))
     } else {
         app
     };

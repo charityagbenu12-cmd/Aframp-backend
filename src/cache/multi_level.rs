@@ -86,12 +86,12 @@ impl MultiLevelCache {
     // -------------------------------------------------------------------------
 
     /// Get from L2 (Redis) only.
-    pub async fn l2_get<T: DeserializeOwned + Send + Sync + 'static>(
+    pub async fn l2_get<T: Serialize + DeserializeOwned + Send + Sync + 'static>(
         &self,
         category: &str,
         key: &str,
     ) -> Option<T> {
-        match self.l2.get::<T>(key).await {
+        match CacheTrait::<T>::get(&self.l2, key).await {
             Ok(Some(v)) => {
                 self.l2_metrics.record_hit(category);
                 debug!(category, key, "L2 cache hit");
@@ -122,8 +122,11 @@ impl MultiLevelCache {
     }
 
     /// Delete from L2 (Redis) only.
-    pub async fn l2_invalidate(&self, key: &str) {
-        if let Err(e) = self.l2.delete(key).await {
+    pub async fn l2_invalidate<T>(&self, key: &str)
+    where
+        T: Serialize + DeserializeOwned + Send + Sync + 'static,
+    {
+        if let Err(e) = CacheTrait::<T>::delete(&self.l2, key).await {
             debug!(key, error = %e, "L2 cache delete error (degraded)");
         } else {
             info!(key, "L2 cache invalidated");
@@ -131,8 +134,11 @@ impl MultiLevelCache {
     }
 
     /// Delete all L2 keys matching a pattern.
-    pub async fn l2_invalidate_pattern(&self, pattern: &str) {
-        match self.l2.delete_pattern(pattern).await {
+    pub async fn l2_invalidate_pattern<T>(&self, pattern: &str)
+    where
+        T: Serialize + DeserializeOwned + Send + Sync + 'static,
+    {
+        match CacheTrait::<T>::delete_pattern(&self.l2, pattern).await {
             Ok(n) => info!(pattern, deleted = n, "L2 cache pattern invalidated"),
             Err(e) => debug!(pattern, error = %e, "L2 pattern delete error (degraded)"),
         }
@@ -146,7 +152,7 @@ impl MultiLevelCache {
     pub async fn invalidate_both(&self, category: L1Category, l1_key: &str, l2_key: &str) {
         tokio::join!(
             self.l1_invalidate(category, l1_key),
-            self.l2_invalidate(l2_key),
+            self.l2_invalidate::<serde_json::Value>(l2_key),
         );
         info!(l1_key, l2_key, "Both cache levels invalidated");
     }

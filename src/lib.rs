@@ -27,6 +27,9 @@ pub mod middleware;
 #[cfg(feature = "database")]
 pub mod logging;
 
+#[cfg(feature = "database")]
+pub mod telemetry;
+
 // Cache layer
 #[cfg(feature = "cache")]
 pub mod cache;
@@ -34,6 +37,9 @@ pub mod cache;
 // Services
 #[cfg(feature = "database")]
 pub mod services;
+
+#[cfg(feature = "database")]
+pub mod recurring;
 
 // Payment providers
 #[cfg(feature = "database")]
@@ -50,6 +56,10 @@ pub mod api;
 // Auth module – JWT generation, validation, middleware
 #[cfg(feature = "database")]
 pub mod auth;
+
+// OAuth 2.0 authorization server
+#[cfg(feature = "database")]
+pub mod oauth;
 
 // Health check module
 #[cfg(feature = "database")]

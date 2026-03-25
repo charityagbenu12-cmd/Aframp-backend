@@ -433,3 +433,38 @@ mod tests {
         assert_eq!(key.to_string(), "v1:auth:rate_limit:user_123:login");
     }
 }
+
+pub mod replay {
+    use super::*;
+
+    pub const NAMESPACE: &str = "nonce";
+
+    /// Namespaced nonce key: `v1:nonce:<consumer_id>:<nonce>`
+    ///
+    /// Stored in Redis with TTL = timestamp_window + safety_buffer.
+    /// Presence of this key means the nonce has already been consumed.
+    #[derive(Debug, Clone)]
+    pub struct NonceKey {
+        pub consumer_id: String,
+        pub nonce: String,
+    }
+
+    impl NonceKey {
+        pub fn new(consumer_id: impl Into<String>, nonce: impl Into<String>) -> Self {
+            Self {
+                consumer_id: consumer_id.into(),
+                nonce: nonce.into(),
+            }
+        }
+    }
+
+    impl fmt::Display for NonceKey {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "{}:{}:{}:{}",
+                VERSION, NAMESPACE, self.consumer_id, self.nonce
+            )
+        }
+    }
+}

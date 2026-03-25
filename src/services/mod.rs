@@ -23,6 +23,8 @@ pub mod payment_orchestrator;
 pub mod rate_providers;
 #[cfg(feature = "database")]
 pub mod trustline_operation;
+#[cfg(feature = "database")]
+pub mod transaction;
 pub mod webhook_processor;
 pub mod notification;
 

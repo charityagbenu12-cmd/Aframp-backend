@@ -473,6 +473,12 @@ impl OnrampProcessor {
                     status = ?status_resp.status,
                     "Provider poll: payment still pending"
                 );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Check payment status with provider directly
     async fn check_payment_with_provider(&self, tx: &Transaction) -> Result<(), ProcessorError> {
         let provider_ref = tx
@@ -1403,6 +1409,9 @@ impl OnrampProcessor {
             .unwrap_or_else(|| format!("refund:{}", tx.transaction_id));
 
         Ok(refund_ref)
+    }
+}
+
 // ============================================================================
 // Metrics (real Prometheus counters via crate::metrics)
 // ============================================================================

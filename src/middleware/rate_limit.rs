@@ -190,7 +190,7 @@ pub async fn rate_limit_middleware(
         .atomic()
         .cmd("ZADD").arg(&redis_key).arg(now_ms).arg(&req_id)
         .cmd("EXPIRE").arg(&redis_key).arg(limit_conf.window)
-        .query_async(&mut *conn).await
+        .query_async::<()>(&mut *conn).await
     {
         Ok(_) => (),
         Err(e) => error!("Failed to add to sorted set for rate_limit_middleware: {}", e),

@@ -32,26 +32,29 @@ impl<T: Clone + Send + 'static> SingleFlight<T> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, String>>,
     {
-        let mut map = self.in_flight.lock().await;
+        {
+            let map = self.in_flight.lock().await;
 
-        if let Some(tx) = map.get(key) {
-            // Another request is already rebuilding — subscribe and wait.
-            let mut rx = tx.subscribe();
-            drop(map); // release lock before awaiting
+            if let Some(tx) = map.get(key) {
+                // Another request is already rebuilding — subscribe and wait.
+                let mut rx = tx.subscribe();
+                drop(map); // release lock before awaiting
 
-            debug!(key, "single-flight: waiting for in-flight rebuild");
-            match rx.recv().await {
-                Ok(result) => {
-                    return (*result).clone().map_err(|e| e.clone());
-                }
-                Err(_) => {
-                    // Sender dropped without sending — treat as miss and rebuild.
+                debug!(key, "single-flight: waiting for in-flight rebuild");
+                match rx.recv().await {
+                    Ok(result) => {
+                        return (*result).clone().map_err(|e| e.clone());
+                    }
+                    Err(_) => {
+                        // Sender dropped without sending — treat as miss and rebuild.
+                    }
                 }
             }
         }
 
         // We are the leader for this key.
         let (tx, _rx) = broadcast::channel::<SharedResult<T>>(1);
+        let mut map = self.in_flight.lock().await;
         map.insert(key.to_string(), tx.clone());
         drop(map); // release lock before doing the expensive rebuild
 

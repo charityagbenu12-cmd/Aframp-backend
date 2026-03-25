@@ -178,7 +178,6 @@ pub async fn generate_challenge(
 pub async fn verify_signature(
     State(state): State<Arc<AuthState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    axum::extract::Host(host): axum::extract::Host,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
     let user_agent = req.headers().get("user-agent").and_then(|h| h.to_str().ok()).unwrap_or("unknown").to_string();

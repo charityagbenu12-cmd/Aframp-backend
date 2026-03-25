@@ -1,11 +1,12 @@
 use crate::database::error::{DatabaseError, DatabaseErrorKind};
 use crate::database::repository::{Repository, TransactionalRepository};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 /// Fee structure entity
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FeeStructure {
     pub id: Uuid,
     pub fee_type: String,

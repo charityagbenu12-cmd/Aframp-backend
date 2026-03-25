@@ -538,6 +538,98 @@ pub mod database {
 }
 
 // ---------------------------------------------------------------------------
+<<<<<<< feat/request-integrity-149
+// Security metrics
+=======
+// Security / replay-prevention metrics  (Issue #141)
+>>>>>>> master
+// ---------------------------------------------------------------------------
+
+pub mod security {
+    use super::*;
+
+<<<<<<< feat/request-integrity-149
+    static REQUEST_ANOMALY_FLAGS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+
+    pub fn request_anomaly_flags_total() -> &'static CounterVec {
+        REQUEST_ANOMALY_FLAGS_TOTAL
+=======
+    static REPLAY_ATTEMPTS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static TIMESTAMP_REJECTIONS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static TIMESTAMP_DELTA_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
+
+    /// Increment when a replay is detected (nonce already seen).
+    pub fn replay_attempts_total() -> &'static CounterVec {
+        REPLAY_ATTEMPTS_TOTAL
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    /// Increment when a request is rejected due to clock skew.
+    pub fn timestamp_rejections_total() -> &'static CounterVec {
+        TIMESTAMP_REJECTIONS_TOTAL
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    /// Histogram of |server_time − request_timestamp| for valid requests.
+    pub fn timestamp_delta_seconds() -> &'static HistogramVec {
+        TIMESTAMP_DELTA_SECONDS
+>>>>>>> master
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub(super) fn register(r: &Registry) {
+<<<<<<< feat/request-integrity-149
+        REQUEST_ANOMALY_FLAGS_TOTAL
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_request_anomaly_flags_total",
+                    "Total non-blocking request anomaly flags by consumer, endpoint, and field",
+                    &["consumer_id", "endpoint", "field"],
+=======
+        REPLAY_ATTEMPTS_TOTAL
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_security_replay_attempts_total",
+                    "Total replay attempts detected, labelled by consumer_id and endpoint",
+                    &["consumer_id", "endpoint"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        TIMESTAMP_REJECTIONS_TOTAL
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_security_timestamp_rejections_total",
+                    "Total requests rejected due to timestamp clock skew",
+                    &["consumer_id", "reason"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        TIMESTAMP_DELTA_SECONDS
+            .set(
+                register_histogram_vec_with_registry!(
+                    "aframp_security_timestamp_delta_seconds",
+                    "Distribution of |server_time - request_timestamp| for accepted requests",
+                    &["consumer_id"],
+                    vec![0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+>>>>>>> master
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Register all metrics
 // ---------------------------------------------------------------------------
 
@@ -549,6 +641,7 @@ fn register_all(r: &Registry) {
     worker::register(r);
     cache::register(r);
     database::register(r);
+    security::register(r);
 }
 
 // ---------------------------------------------------------------------------
