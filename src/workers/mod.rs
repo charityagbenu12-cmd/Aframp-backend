@@ -1,5 +1,7 @@
 pub mod batch_processor;
 pub mod bill_processor;
+#[cfg(feature = "database")]
+pub mod key_rotation_worker;
 pub mod maintenance;
 pub mod offramp_processor;
 pub mod onramp_processor;
@@ -8,3 +10,6 @@ pub mod recurring_payment_worker;
 pub mod stellar_confirmation_worker;
 pub mod transaction_monitor;
 pub mod webhook_retry;
+pub mod bill_processor;
+pub mod batch_processor;
+pub mod recurring_payment_worker;

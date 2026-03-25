@@ -21,5 +21,3 @@ pub mod request_integrity;
 pub mod hmac_signing;
 #[cfg(feature = "database")]
 pub mod replay_prevention;
-#[cfg(feature = "database")]
-pub mod signature_verification;

@@ -225,16 +225,11 @@ pub fn compute_signature(
 /// Parsed components of the `X-Aframp-Signature` header.
 ///
 /// Format: `algorithm=HMAC-SHA256,timestamp=<unix_ts>,signature=<hex>`
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ParsedSignature {
     pub algorithm: HmacAlgorithm,
     pub timestamp: i64,
     pub signature: String,
-}
-
-/// Exposed for the signature verification middleware (Issue #140).
-pub fn parse_signature_header_pub(header: &str) -> Option<ParsedSignature> {
-    parse_signature_header(header)
 }
 
 fn parse_signature_header(header: &str) -> Option<ParsedSignature> {

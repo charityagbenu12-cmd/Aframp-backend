@@ -1,8 +1,10 @@
 mod api;
+mod api_keys;
 mod auth;
 mod cache;
 mod chains;
 mod config;
+mod config_validation;
 mod database;
 mod error;
 mod health;
@@ -11,6 +13,7 @@ mod metrics;
 mod middleware;
 mod oauth;
 mod payments;
+mod recurring;
 mod services;
 mod workers;
 
@@ -24,7 +27,7 @@ use crate::payments::types::{
     CustomerContact, Money, PaymentMethod, PaymentRequest as ProviderPaymentRequest, ProviderName,
 };
 use axum::{
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use cache::{init_cache_pool, build_multi_level_cache, CacheConfig, RedisCache};
@@ -106,6 +109,18 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("❌ Configuration validation failed: {}", e);
         anyhow::anyhow!("Configuration validation error: {}", e)
     })?;
+
+    // Production-grade startup validation — enforces TLS, secret hygiene,
+    // and environment-specific rules. Fatal in staging/production.
+    if let Err(e) = config_validation::validate_production_config() {
+        let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".into());
+        if app_env != "development" {
+            eprintln!("❌ {}", e);
+            std::process::exit(1);
+        } else {
+            eprintln!("⚠️  Config warnings (non-fatal in development):\n{}", e);
+        }
+    }
 
     // -------------------------------------------------------------------------
     // 2. Initialise OpenTelemetry tracer provider.   (Issue #104)
@@ -1044,6 +1059,59 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // ── Recurring payment routes (Issue #122) ────────────────────────────────
+    let recurring_routes = if let Some(pool) = db_pool.clone() {
+        let failure_threshold = std::env::var("RECURRING_FAILURE_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let recurring_state = std::sync::Arc::new(api::recurring::RecurringState {
+            repo: std::sync::Arc::new(
+                database::recurring_payment_repository::RecurringPaymentRepository::new(pool.clone()),
+            ),
+            default_failure_threshold: failure_threshold,
+        });
+        Router::new()
+            .route("/api/recurring", post(api::recurring::create_schedule))
+            .route("/api/recurring", get(api::recurring::list_schedules))
+            .route("/api/recurring/{id}", get(api::recurring::get_schedule))
+            .route("/api/recurring/{id}", patch(api::recurring::update_schedule))
+            .route("/api/recurring/{id}", delete(api::recurring::cancel_schedule))
+            .with_state(recurring_state)
+    } else {
+        info!("Skipping recurring routes (no database)");
+        Router::new()
+    };
+
+    // Start Recurring Payment Worker (Issue #122)
+    let recurring_worker_enabled = std::env::var("RECURRING_WORKER_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        != "false";
+    if recurring_worker_enabled {
+        if let Some(pool) = db_pool.clone() {
+            let worker_config = workers::recurring_payment_worker::RecurringWorkerConfig::from_env();
+            info!(
+                poll_interval_secs = worker_config.poll_interval.as_secs(),
+                batch_size = worker_config.batch_size,
+                "Starting recurring payment worker"
+            );
+            let repo = std::sync::Arc::new(
+                database::recurring_payment_repository::RecurringPaymentRepository::new(pool),
+            );
+            let worker = workers::recurring_payment_worker::RecurringPaymentWorker::new(
+                repo,
+                worker_config,
+            );
+            tokio::spawn(worker.run(worker_shutdown_rx.clone()));
+            info!("✅ Recurring payment worker started");
+        } else {
+            info!("Skipping recurring payment worker (no database)");
+        }
+    } else {
+        info!("Recurring payment worker disabled (RECURRING_WORKER_ENABLED=false)");
+    }
+
     // ── Batch transaction routes (Issue #125) ────────────────────────────────
     let batch_routes = if let Some(pool) = db_pool.clone() {
         let batch_state = api::batch::BatchState::new(std::sync::Arc::new(pool));
@@ -1082,7 +1150,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Admin scope management routes (Issue #132) ───────────────────────────
     let admin_routes = if let Some(pool) = db_pool.clone() {
         let scopes_state = api::admin::scopes::ScopesState {
-            db: std::sync::Arc::new(pool),
+            db: std::sync::Arc::new(pool.clone()),
+        };
+        let keys_state = api::admin::keys::AdminKeysState {
+            db: std::sync::Arc::new(pool.clone()),
         };
         Router::new()
             .route("/api/admin/scopes", get(api::admin::scopes::list_scopes))
@@ -1092,8 +1163,50 @@ async fn main() -> anyhow::Result<()> {
                     .patch(api::admin::scopes::update_key_scopes),
             )
             .with_state(scopes_state)
+            .merge(
+                Router::new()
+                    // Issue #131 — API key issuance
+                    .route(
+                        "/api/admin/consumers/{consumer_id}/keys",
+                        post(api::admin::keys::issue_key)
+                            .get(api::admin::keys::list_keys),
+                    )
+                    .route(
+                        "/api/admin/consumers/{consumer_id}/keys/{key_id}",
+                        delete(api::admin::keys::revoke_key),
+                    )
+                    .with_state(keys_state),
+            )
     } else {
         info!("Skipping admin routes (no database)");
+        Router::new()
+    };
+
+    // ── Key rotation routes (Issue #137) ─────────────────────────────────────
+    let key_rotation_routes = if let Some(pool) = db_pool.clone() {
+        let rotation_state = api::key_rotation::KeyRotationState {
+            db: std::sync::Arc::new(pool.clone()),
+        };
+        let rotation_service = services::key_rotation::KeyRotationService::new(pool.clone());
+        let rotation_worker = workers::key_rotation_worker::KeyRotationWorker::new(rotation_service);
+        tokio::spawn(rotation_worker.run(worker_shutdown_rx.clone()));
+        info!("✅ Key rotation worker started");
+        api::key_rotation::developer_rotation_router(rotation_state.clone())
+            .merge(api::key_rotation::admin_rotation_router(rotation_state))
+    } else {
+        info!("Skipping key rotation routes (no database)");
+    // ── Developer self-service key routes (Issue #131) ───────────────────────
+    let developer_routes = if let Some(pool) = db_pool.clone() {
+        let dev_state = api::developer::keys::DeveloperKeysState {
+            db: std::sync::Arc::new(pool),
+        };
+        Router::new()
+            .route("/api/developer/keys", post(api::developer::keys::issue_key))
+            .route("/api/developer/keys", get(api::developer::keys::list_keys))
+            .route("/api/developer/keys/{key_id}", delete(api::developer::keys::revoke_key))
+            .with_state(dev_state)
+    } else {
+        info!("Skipping developer routes (no database)");
         Router::new()
     };
 
@@ -1173,7 +1286,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth_routes)
         .merge(batch_routes)
         .merge(admin_routes)
+        .merge(key_rotation_routes)
         .merge(openapi_routes)
+        .merge(recurring_routes)
+        .merge(developer_routes)
         .merge(oauth_routes)
         .merge(history_routes)
         .with_state(AppState {
