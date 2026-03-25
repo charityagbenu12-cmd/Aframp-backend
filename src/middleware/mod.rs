@@ -19,3 +19,7 @@ pub mod replay_prevention;
 pub mod scope_middleware;
 #[cfg(feature = "database")]
 pub mod request_integrity;
+#[cfg(feature = "database")]
+pub mod hmac_signing;
+#[cfg(feature = "database")]
+pub mod replay_prevention;

@@ -1,6 +1,35 @@
 version: "3.9"
 
 # =============================================================================
+
+# Integration test override — ephemeral services, no persistent volumes.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.test.yml up --abort-on-container-exit
+# =============================================================================
+
+services:
+  app:
+    environment:
+      APP_ENV: development
+      DATABASE_URL: "postgres://aframp:aframp_test@postgres:5432/aframp_test?sslmode=disable"
+      REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: "ERROR"
+    # No env_file — all config explicit for reproducibility
+
+  postgres:
+    environment:
+      POSTGRES_USER: aframp
+      POSTGRES_PASSWORD: aframp_test
+      POSTGRES_DB: aframp_test
+    volumes: []   # no persistent storage
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    volumes: []   # no persistent storage
+    tmpfs:
+      - /data
+    command: redis-server --appendonly no
+
 # Aframp Backend — integration test override
 #
 # Extends docker-compose.yml with ephemeral (no persistent volumes) services
@@ -99,3 +128,4 @@ volumes:
   # anonymous volumes and removed automatically with `docker compose down -v`
   postgres_data:
   redis_data:
+

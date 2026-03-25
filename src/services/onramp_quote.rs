@@ -91,6 +91,46 @@ fn decimal_to_i64_trunc(value: &BigDecimal) -> i64 {
         .unwrap_or(0)
 }
 
+fn build_quote_expiry(now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    now + chrono::Duration::seconds(QUOTE_TTL_SECS as i64)
+}
+
+fn is_quote_expired(expires_at: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> bool {
+    now >= expires_at
+}
+
+fn derive_quote_amounts(
+    amount_ngn: &BigDecimal,
+    platform_fee_ngn: &BigDecimal,
+    provider_fee_ngn: &BigDecimal,
+    conversion_net_amount: Option<&str>,
+) -> Result<(BigDecimal, BigDecimal), AppError> {
+    let total_fee_ngn = platform_fee_ngn + provider_fee_ngn;
+    let amount_ngn_after_fees = amount_ngn - &total_fee_ngn;
+
+    if amount_ngn_after_fees <= BigDecimal::from(0) {
+        return Err(AppError::new(AppErrorKind::Domain(
+            DomainError::InvalidAmount {
+                amount: amount_ngn.to_string(),
+                reason: "Amount after fees must be greater than zero".to_string(),
+            },
+        )));
+    }
+
+    let amount_cngn = conversion_net_amount
+        .and_then(|value| BigDecimal::from_str(value).ok())
+        .filter(|value| value > &BigDecimal::from(0))
+        .unwrap_or_else(|| amount_ngn_after_fees.clone());
+
+    Ok((amount_ngn_after_fees, amount_cngn))
+}
+
+fn split_fallback_onramp_fee(total_fee: &BigDecimal) -> (BigDecimal, BigDecimal) {
+    let platform_fee = total_fee * BigDecimal::from_str("0.2").unwrap();
+    let provider_fee = total_fee - &platform_fee;
+    (platform_fee, provider_fee)
+}
+
 /// API request for onramp quote
 #[derive(Debug, Clone, Deserialize)]
 pub struct OnrampQuoteRequest {
@@ -267,21 +307,12 @@ impl OnrampQuoteService {
             };
 
         let total_fee_ngn = &platform_fee_ngn + &provider_fee_ngn;
-        let amount_ngn_after_fees = &amount_bd - &total_fee_ngn;
-        if amount_ngn_after_fees <= BigDecimal::from(0) {
-            return Err(AppError::new(AppErrorKind::Domain(
-                DomainError::InvalidAmount {
-                    amount: request.amount_ngn.to_string(),
-                    reason: "Amount after fees must be greater than zero".to_string(),
-                },
-            )));
-        }
-
-        // Use conversion net amount when available; fall back to NGN-after-fees for peg scenarios.
-        let amount_cngn_bd = BigDecimal::from_str(&conversion.net_amount)
-            .ok()
-            .filter(|v| v > &BigDecimal::from(0))
-            .unwrap_or_else(|| amount_ngn_after_fees.clone());
+        let (amount_ngn_after_fees, amount_cngn_bd) = derive_quote_amounts(
+            &amount_bd,
+            &platform_fee_ngn,
+            &provider_fee_ngn,
+            Some(&conversion.net_amount),
+        )?;
         let rate =
             BigDecimal::from_str(&conversion.base_rate).unwrap_or_else(|_| BigDecimal::from(1));
 
@@ -311,7 +342,7 @@ impl OnrampQuoteService {
 
         // 6. Generate quote_id and persist to Redis
         let quote_id = format!("q_{}", Uuid::new_v4().simple());
-        let expires_at = Utc::now() + chrono::Duration::seconds(QUOTE_TTL_SECS as i64);
+        let expires_at = build_quote_expiry(Utc::now());
 
         let stored = StoredQuote {
             quote_id: quote_id.clone(),
@@ -440,9 +471,7 @@ impl OnrampQuoteService {
                 })?;
 
             let total_fee = total.map(|r| r.fee).unwrap_or_else(|| BigDecimal::from(0));
-            let platform = &total_fee * BigDecimal::from_str("0.2").unwrap();
-            let provider = &total_fee - &platform;
-            return Ok((platform, provider));
+            return Ok(split_fallback_onramp_fee(&total_fee));
         }
 
         Ok((platform_fee_bd, provider_fee_bd))
@@ -491,6 +520,7 @@ impl OnrampQuoteService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn test_min_onramp_amount() {
@@ -534,5 +564,91 @@ mod tests {
             chain: Some("stellar".to_string()),
         };
         assert!(request.amount_ngn >= MIN_ONRAMP_AMOUNT_NGN);
+    }
+
+    #[test]
+    fn test_decimal_to_i64_trunc_drops_fractional_component() {
+        assert_eq!(
+            decimal_to_i64_trunc(&BigDecimal::from_str("49250.99").unwrap()),
+            49250
+        );
+    }
+
+    #[test]
+    fn test_derive_quote_amounts_uses_conversion_net_amount_when_present() {
+        let (amount_ngn_after_fees, amount_cngn) = derive_quote_amounts(
+            &BigDecimal::from(50000),
+            &BigDecimal::from(50),
+            &BigDecimal::from(700),
+            Some("49250"),
+        )
+        .unwrap();
+
+        assert_eq!(amount_ngn_after_fees, BigDecimal::from(49250));
+        assert_eq!(amount_cngn, BigDecimal::from(49250));
+    }
+
+    #[test]
+    fn test_derive_quote_amounts_falls_back_to_net_ngn_for_zero_conversion_net() {
+        let (amount_ngn_after_fees, amount_cngn) = derive_quote_amounts(
+            &BigDecimal::from(50000),
+            &BigDecimal::from(50),
+            &BigDecimal::from(700),
+            Some("0"),
+        )
+        .unwrap();
+
+        assert_eq!(amount_ngn_after_fees, BigDecimal::from(49250));
+        assert_eq!(amount_cngn, BigDecimal::from(49250));
+    }
+
+    #[test]
+    fn test_derive_quote_amounts_rejects_amount_when_fees_consume_all_value() {
+        let result = derive_quote_amounts(
+            &BigDecimal::from(1000),
+            &BigDecimal::from(400),
+            &BigDecimal::from(600),
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppError {
+                kind: AppErrorKind::Domain(DomainError::InvalidAmount { .. }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_split_fallback_onramp_fee_preserves_total_amount() {
+        let (platform_fee, provider_fee) =
+            split_fallback_onramp_fee(&BigDecimal::from_str("750").unwrap());
+
+        assert_eq!(platform_fee, BigDecimal::from_str("150").unwrap());
+        assert_eq!(provider_fee, BigDecimal::from_str("600").unwrap());
+        assert_eq!(
+            platform_fee + provider_fee,
+            BigDecimal::from_str("750").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_quote_expiry_helpers_are_deterministic() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 25, 10, 0, 0).unwrap();
+        let expires_at = build_quote_expiry(now);
+
+        assert_eq!(
+            expires_at,
+            Utc.with_ymd_and_hms(2026, 3, 25, 10, 3, 0).unwrap()
+        );
+        assert!(!is_quote_expired(
+            expires_at,
+            Utc.with_ymd_and_hms(2026, 3, 25, 10, 2, 59).unwrap()
+        ));
+        assert!(is_quote_expired(
+            expires_at,
+            Utc.with_ymd_and_hms(2026, 3, 25, 10, 3, 0).unwrap()
+        ));
     }
 }

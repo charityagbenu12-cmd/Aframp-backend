@@ -97,3 +97,34 @@ fn calculate_rate_fee(amount: &BigDecimal, fee_rate_bps: i32) -> BigDecimal {
 pub fn parse_amount(amount: &str) -> BigDecimal {
     BigDecimal::from_str(amount).unwrap_or_else(|_| BigDecimal::from(0))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_rate_fee_for_standard_amount() {
+        let fee = calculate_rate_fee(&BigDecimal::from_str("50000").unwrap(), 140);
+
+        assert_eq!(fee, BigDecimal::from_str("700.00").unwrap());
+    }
+
+    #[test]
+    fn test_calculate_rate_fee_for_zero_bps_returns_zero() {
+        let fee = calculate_rate_fee(&BigDecimal::from_str("50000").unwrap(), 0);
+
+        assert_eq!(fee, BigDecimal::from(0));
+    }
+
+    #[test]
+    fn test_calculate_rate_fee_preserves_fractional_precision() {
+        let fee = calculate_rate_fee(&BigDecimal::from_str("1000.125").unwrap(), 10);
+
+        assert_eq!(fee, BigDecimal::from_str("1.000125").unwrap());
+    }
+
+    #[test]
+    fn test_parse_amount_returns_zero_for_invalid_input() {
+        assert_eq!(parse_amount("not-a-number"), BigDecimal::from(0));
+    }
+}

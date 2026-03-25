@@ -28,7 +28,7 @@ pub mod transaction;
 pub mod webhook_processor;
 pub mod notification;
 #[cfg(feature = "database")]
-pub mod revocation;
+pub mod key_rotation;
 
 // Re-export blockchain traits for convenience
 #[cfg(feature = "database")]

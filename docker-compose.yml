@@ -1,6 +1,59 @@
 version: "3.9"
 
 # =============================================================================
+# Local development stack
+# Secrets come from .env (never committed). See .env.example.
+# =============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: development
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8000"
+      DATABASE_URL: "postgres://aframp:aframp_dev@postgres:5432/aframp_dev?sslmode=disable"
+      REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: "${LOG_LEVEL:-DEBUG}"
+      LOG_FORMAT: "${LOG_FORMAT:-plain}"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aframp
+      POSTGRES_PASSWORD: aframp_dev
+      POSTGRES_DB: aframp_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/afri_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c log_min_duration_statement=200
+      -c log_statement=none
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aframp -d aframp_dev"]
 # Aframp Backend — local development stack
 #
 # Services:
@@ -36,6 +89,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 
   # ---------------------------------------------------------------------------
   # Redis
@@ -147,6 +221,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 90s
+
 
 volumes:
   postgres_data:
