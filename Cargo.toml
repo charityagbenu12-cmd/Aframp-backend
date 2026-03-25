@@ -193,6 +193,14 @@ path = "tests/key_rotation_integration.rs"
 required-features = ["database"]
 
 # ---------------------------------------------------------------------------
+# Integration test — HMAC request signing (Issue #139)
+# ---------------------------------------------------------------------------
+[[test]]
+name = "hmac_signing_test"
+path = "tests/hmac_signing_test.rs"
+required-features = ["database"]
+
+# ---------------------------------------------------------------------------
 # Dev dependencies
 # ---------------------------------------------------------------------------
 [dev-dependencies]
