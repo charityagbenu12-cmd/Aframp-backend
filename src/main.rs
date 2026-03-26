@@ -6,6 +6,8 @@ mod chains;
 mod config;
 mod config_validation;
 mod database;
+mod ddos;
+mod developer_portal;
 mod error;
 mod health;
 mod logging;
@@ -15,6 +17,7 @@ mod oauth;
 mod payments;
 mod recurring;
 mod services;
+mod telemetry;
 mod workers;
 
 // Imports
@@ -38,6 +41,8 @@ use database::{init_pool, PoolConfig};
 use dotenv::dotenv;
 use middleware::logging::{request_logging_middleware, UuidRequestId};
 use middleware::metrics::metrics_middleware;
+use middleware::cors::{cors_middleware, CorsConfig};
+use middleware::security::security_headers_middleware;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -49,9 +54,6 @@ use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tracing::{error, info};
 use uuid::Uuid;
 
-// Re-export the telemetry module so `init_tracer` / `shutdown_tracer` resolve.
-// In the real project this module lives at src/telemetry/mod.rs (Issue #104).
-mod telemetry;
 
 /// Graceful shutdown signal handler
 async fn shutdown_signal() {
@@ -831,7 +833,7 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
             .route("/api/onramp/quote", post(create_onramp_quote))
             .with_state(quote_service)
-            .route("/api/onramp/status/tx_id", get(api::onramp::get_onramp_status))
+            .route("/api/onramp/status/:tx_id", get(api::onramp::get_onramp_status))
             .with_state(status_service)
             .route(
                 "/api/onramp/initiate",
@@ -1112,6 +1114,41 @@ async fn main() -> anyhow::Result<()> {
         info!("Recurring payment worker disabled (RECURRING_WORKER_ENABLED=false)");
     }
 
+    // ── IP Detection Worker (Issue #166) ─────────────────────────────────────
+    let ip_detection_worker_enabled = std::env::var("IP_DETECTION_WORKER_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        != "false";
+    if ip_detection_worker_enabled {
+        if let (Some(pool), Some(cache)) = (db_pool.clone(), redis_cache.clone()) {
+            let detection_service = std::sync::Arc::new(
+                crate::services::ip_detection::IpDetectionService::new(
+                    database::ip_reputation_repository::IpReputationRepository::new(pool),
+                    std::sync::Arc::new(cache),
+                    Default::default(),
+                )
+            );
+
+            // Bootstrap blocked IPs cache on startup
+            if let Err(e) = detection_service.bootstrap_blocked_ips_cache().await {
+                error!(error = %e, "Failed to bootstrap blocked IPs cache");
+            }
+
+            let worker_config = workers::ip_detection_worker::IpDetectionWorkerConfig::from_env();
+            let worker = workers::ip_detection_worker::IpDetectionWorker::new(
+                database::ip_reputation_repository::IpReputationRepository::new(db_pool.clone().unwrap()),
+                detection_service,
+                worker_config,
+            );
+            tokio::spawn(worker.run(worker_shutdown_rx.clone()));
+            info!("✅ IP detection worker started");
+        } else {
+            info!("Skipping IP detection worker (missing database or cache)");
+        }
+    } else {
+        info!("IP detection worker disabled (IP_DETECTION_WORKER_ENABLED=false)");
+    }
+
     // ── Batch transaction routes (Issue #125) ────────────────────────────────
     let batch_routes = if let Some(pool) = db_pool.clone() {
         let batch_state = api::batch::BatchState::new(std::sync::Arc::new(pool));
@@ -1155,7 +1192,31 @@ async fn main() -> anyhow::Result<()> {
         let keys_state = api::admin::keys::AdminKeysState {
             db: std::sync::Arc::new(pool.clone()),
         };
+        let ip_reputation_state = api::admin::ip_reputation::IpReputationState {
+            repo: database::ip_reputation_repository::IpReputationRepository::new(pool.clone()),
+        };
         Router::new()
+
+        // ── Revocation & Blacklist routes (Issue #138) ────────────────────────
+        let revocation_state = if let Some(ref redis) = redis_cache {
+            let svc = std::sync::Arc::new(services::revocation::RevocationService::new(
+                std::sync::Arc::new(pool.clone()),
+                std::sync::Arc::new(redis.clone()),
+                notification_service.clone(),
+            ));
+            let svc_clone = svc.clone();
+            tokio::spawn(async move {
+                if let Err(e) = svc_clone.bootstrap_redis_blacklist().await {
+                    tracing::error!(error = %e, "Redis blacklist bootstrap failed");
+                }
+            });
+            Some(api::admin::revocation::RevocationState { service: svc })
+        } else {
+            info!("Skipping revocation service (no Redis)");
+            None
+        };
+
+        let mut router = Router::new()
             .route("/api/admin/scopes", get(api::admin::scopes::list_scopes))
             .route(
                 "/api/admin/consumers/{consumer_id}/keys/{key_id}/scopes",
@@ -1177,9 +1238,55 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .with_state(keys_state),
             )
+            .merge(
+                Router::new()
+                    // Issue #166 — IP reputation management
+                    .route(
+                        "/api/admin/ip-reputation",
+                        get(api::admin::ip_reputation::list_flagged_ips),
+                    )
+                    .route(
+                        "/api/admin/ip-reputation/{ip}",
+                        get(api::admin::ip_reputation::get_ip_reputation),
+                    )
+                    .route(
+                        "/api/admin/ip-reputation/{ip}/block",
+                        post(api::admin::ip_reputation::block_ip),
+                    )
+                    .route(
+                        "/api/admin/ip-reputation/{ip}/unblock",
+                        post(api::admin::ip_reputation::unblock_ip),
+                    )
+                    .route(
+                        "/api/admin/ip-reputation/{ip}/whitelist",
+                        post(api::admin::ip_reputation::whitelist_ip),
+                    )
+                    .with_state(ip_reputation_state),
+            )
     } else {
         info!("Skipping admin routes (no database)");
         Router::new()
+    };
+
+    // ── DDoS protection state and admin routes ────────────────────────────────
+    let (ddos_state, ddos_admin_routes) = if let Some(ref cache) = redis_cache {
+        let ddos_config = ddos::config::DdosConfig::from_env();
+        let state = std::sync::Arc::new(ddos::state::DdosState::new(ddos_config, cache.clone()));
+        // Spawn CDN sync background task
+        {
+            let s = state.clone();
+            let interval = state.config.cdn_sync_interval_secs;
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+                loop { ticker.tick().await; s.sync_cdn_blocklist().await; }
+            });
+        }
+        let routes = ddos::admin::ddos_admin_router(state.clone());
+        info!("✅ DDoS protection enabled");
+        (Some(state), routes)
+    } else {
+        info!("⏭️  Skipping DDoS protection (no Redis cache)");
+        (None, Router::new())
     };
 
     // ── Key rotation routes (Issue #137) ─────────────────────────────────────
@@ -1289,15 +1396,95 @@ async fn main() -> anyhow::Result<()> {
         .merge(key_rotation_routes)
         .merge(openapi_routes)
         .merge(recurring_routes)
+    let app = Router::new()
+        .route("/", get(root))
+        .route("/health", get(health))
+        .route("/health/ready", get(readiness))
+        .route("/health/live", get(liveness))
+        .route("/metrics", get(metrics::handler::metrics_handler))
+        .route("/api/stellar/account/{address}", get(get_stellar_account))
+        .route(
+            "/api/trustlines/operations",
+            post(create_trustline_operation),
+        )
+        .route(
+            "/api/trustlines/operations/{id}",
+            patch(update_trustline_operation_status),
+        )
+        .route(
+            "/api/trustlines/operations/wallet/{address}",
+            get(list_trustline_operations_by_wallet),
+        )
+        .route("/api/fees/calculate", post(calculate_fee))
+        .route("/api/cngn/trustlines/check", post(check_cngn_trustline))
+        .route(
+            "/api/cngn/trustlines/preflight",
+            post(preflight_cngn_trustline),
+        )
+        .route("/api/cngn/trustlines/build", post(build_cngn_trustline))
+        .route("/api/cngn/trustlines/submit", post(submit_cngn_trustline))
+        .route(
+            "/api/cngn/trustlines/retry/{id}",
+            post(retry_cngn_trustline),
+        )
+        .route("/api/cngn/payments/build", post(build_cngn_payment))
+        .route("/api/cngn/payments/sign", post(sign_cngn_payment))
+        .route("/api/cngn/payments/submit", post(submit_cngn_payment))
+        .route("/api/payments/initiate", post(initiate_payment))
+        .merge(onramp_routes)
+        .merge(offramp_routes)
+        .merge(wallet_routes)
+        .merge(rates_routes)
+        .merge(fees_routes)
+        .merge(webhook_routes)
+        .merge(history_routes)
+        .merge(auth_routes)
+        .merge(batch_routes)
+        .merge(admin_routes)
+        .merge(key_rotation_routes)
+        .merge(openapi_routes)
+        .merge(recurring_routes)
         .merge(developer_routes)
         .merge(oauth_routes)
         .merge(history_routes)
+        .merge(ddos_admin_routes)
+        .merge(developer_portal::routes::register_developer_portal_routes(Router::new(), db_pool.clone()))
         .with_state(AppState {
             db_pool,
             redis_cache,
             stellar_client,
             health_checker,
             warming_state: Some(warming_state),
+        });
+
+    // Apply middleware conditionally based on available services
+    let app = if let (Some(db_pool), Some(redis_cache)) = (db_pool.clone(), redis_cache.clone()) {
+        let ip_blocking_state = crate::middleware::ip_blocking::IpBlockingState {
+            detection_service: std::sync::Arc::new(
+                crate::services::ip_detection::IpDetectionService::new(
+                    database::ip_reputation_repository::IpReputationRepository::new(db_pool),
+                    std::sync::Arc::new(redis_cache.clone()),
+                    Default::default(),
+                )
+            ),
+        };
+
+        app.layer(
+            ServiceBuilder::new()
+                .layer(SetRequestIdLayer::x_request_id(UuidRequestId))
+                .layer(axum::middleware::from_fn(
+                    crate::telemetry::middleware::tracing_middleware,
+                ))
+                .layer(axum::middleware::from_fn_with_state(
+                    ip_blocking_state,
+                    crate::middleware::ip_blocking::ip_blocking_middleware,
+                ))
+                .layer(axum::middleware::from_fn(metrics_middleware))
+                .layer(axum::middleware::from_fn(request_logging_middleware))
+                .layer(PropagateRequestIdLayer::x_request_id()),
+        )
+    } else {
+        app.layer(
         })
         .layer(
             // ---------------------------------------------------------------
@@ -1305,11 +1492,13 @@ async fn main() -> anyhow::Result<()> {
             // last on the way out.
             //
             // Order (outermost → innermost, i.e. the order added here):
-            //   1. SetRequestIdLayer       — assigns x-request-id UUID
-            //   2. tracing_middleware      — extracts W3C traceparent, opens
+            //   1. CORS middleware         — handles cross-origin requests
+            //   2. Security headers        — adds security headers to responses
+            //   3. SetRequestIdLayer       — assigns x-request-id UUID
+            //   4. tracing_middleware      — extracts W3C traceparent, opens
             //                               root span per request (Issue #104)
-            //   3. request_logging_middleware — structured access log line
-            //   4. PropagateRequestIdLayer — copies x-request-id to response
+            //   5. request_logging_middleware — structured access log line
+            //   6. PropagateRequestIdLayer — copies x-request-id to response
             //
             // The tracing middleware is inserted between SetRequestId and the
             // existing request_logging_middleware so:
@@ -1318,14 +1507,20 @@ async fn main() -> anyhow::Result<()> {
             //     trace_id / span_id in its JSON output.
             // ---------------------------------------------------------------
             ServiceBuilder::new()
+                .layer(axum::middleware::from_fn_with_state(
+                    CorsConfig::from_env(),
+                    cors_middleware,
+                ))
+                .layer(axum::middleware::from_fn(security_headers_middleware))
                 .layer(SetRequestIdLayer::x_request_id(UuidRequestId))
                 .layer(axum::middleware::from_fn(
-                    crate::telemetry::middleware::tracing_middleware,  // Issue #104
+                    crate::telemetry::middleware::tracing_middleware,
                 ))
                 .layer(axum::middleware::from_fn(metrics_middleware))
                 .layer(axum::middleware::from_fn(request_logging_middleware))
                 .layer(PropagateRequestIdLayer::x_request_id()),
-        );
+        )
+    };
 
     let rate_limit_config = std::sync::Arc::new(crate::middleware::rate_limit::RateLimitConfig::load("rate_limits.yaml").unwrap_or_else(|e| {
         tracing::warn!("Failed to load rate_limits.yaml, using defaults: {}", e);
@@ -1356,6 +1551,16 @@ async fn main() -> anyhow::Result<()> {
                 crate::middleware::replay_prevention::replay_prevention_middleware,
             ))
             .layer(axum::middleware::from_fn_with_state(rate_limit_state, crate::middleware::rate_limit::rate_limit_middleware))
+    } else {
+        app
+    };
+
+    // Apply DDoS middleware if state was initialised
+    let app = if let Some(ds) = ddos_state {
+        app.layer(axum::middleware::from_fn_with_state(
+            ds,
+            crate::ddos::middleware::ddos_middleware,
+        ))
     } else {
         app
     };

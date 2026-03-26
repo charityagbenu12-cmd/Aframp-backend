@@ -99,6 +99,8 @@ pub enum DomainError {
     },
     /// Insufficient cNGN liquidity on Stellar for onramp
     InsufficientLiquidity { amount: String },
+    /// Access forbidden (e.g., transaction doesn't belong to requesting wallet)
+    Forbidden { message: String },
 }
 
 /// Infrastructure-level errors (database, cache, configuration)
@@ -151,6 +153,12 @@ pub enum ValidationError {
         field: String,
         min: Option<String>,
         max: Option<String>,
+    },
+    /// Invalid format for field
+    InvalidFormat {
+        field: String,
+        expected: String,
+        got: String,
     },
 }
 

@@ -4,6 +4,7 @@
 //! Metric names follow Prometheus naming conventions: snake_case, unit suffix where
 //! applicable, and the `aframp_` namespace prefix.
 
+pub mod geo_restriction;
 pub mod handler;
 pub mod tests;
 
@@ -538,22 +539,17 @@ pub mod database {
 }
 
 // ---------------------------------------------------------------------------
-<<<<<<< feat/request-integrity-149
 // Security metrics
-=======
 // Security / replay-prevention metrics  (Issue #141)
->>>>>>> master
 // ---------------------------------------------------------------------------
 
 pub mod security {
     use super::*;
 
-<<<<<<< feat/request-integrity-149
     static REQUEST_ANOMALY_FLAGS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
 
     pub fn request_anomaly_flags_total() -> &'static CounterVec {
         REQUEST_ANOMALY_FLAGS_TOTAL
-=======
     static REPLAY_ATTEMPTS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
     static TIMESTAMP_REJECTIONS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
     static TIMESTAMP_DELTA_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
@@ -575,20 +571,17 @@ pub mod security {
     /// Histogram of |server_time − request_timestamp| for valid requests.
     pub fn timestamp_delta_seconds() -> &'static HistogramVec {
         TIMESTAMP_DELTA_SECONDS
->>>>>>> master
             .get()
             .expect("metrics not initialised")
     }
 
     pub(super) fn register(r: &Registry) {
-<<<<<<< feat/request-integrity-149
         REQUEST_ANOMALY_FLAGS_TOTAL
             .set(
                 register_counter_vec_with_registry!(
                     "aframp_request_anomaly_flags_total",
                     "Total non-blocking request anomaly flags by consumer, endpoint, and field",
                     &["consumer_id", "endpoint", "field"],
-=======
         REPLAY_ATTEMPTS_TOTAL
             .set(
                 register_counter_vec_with_registry!(
@@ -620,7 +613,102 @@ pub mod security {
                     "Distribution of |server_time - request_timestamp| for accepted requests",
                     &["consumer_id"],
                     vec![0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
->>>>>>> master
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IP Detection & Blocking metrics (Issue #166)
+// ---------------------------------------------------------------------------
+
+pub mod ip_detection {
+    use super::*;
+
+    static IP_FLAGGED_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static IP_BLOCKS_APPLIED_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static IP_SHADOW_BLOCKS_APPLIED_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static IP_BLOCK_ENFORCEMENT_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static IP_AUTOMATED_BLOCKING_RATE: OnceLock<GaugeVec> = OnceLock::new();
+
+    pub fn ip_flagged_total() -> &'static CounterVec {
+        IP_FLAGGED_TOTAL.get().expect("metrics not initialised")
+    }
+
+    pub fn ip_blocks_applied_total() -> &'static CounterVec {
+        IP_BLOCKS_APPLIED_TOTAL.get().expect("metrics not initialised")
+    }
+
+    pub fn ip_shadow_blocks_applied_total() -> &'static CounterVec {
+        IP_SHADOW_BLOCKS_APPLIED_TOTAL.get().expect("metrics not initialised")
+    }
+
+    pub fn ip_block_enforcement_total() -> &'static CounterVec {
+        IP_BLOCK_ENFORCEMENT_TOTAL.get().expect("metrics not initialised")
+    }
+
+    pub fn ip_automated_blocking_rate() -> &'static GaugeVec {
+        IP_AUTOMATED_BLOCKING_RATE.get().expect("metrics not initialised")
+    }
+
+    pub(super) fn register(r: &Registry) {
+        IP_FLAGGED_TOTAL
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_ip_flagged_total",
+                    "Total IPs flagged by detection source",
+                    &["detection_source", "evidence_type"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        IP_BLOCKS_APPLIED_TOTAL
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_ip_blocks_applied_total",
+                    "Total IP blocks applied by block type",
+                    &["block_type"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        IP_SHADOW_BLOCKS_APPLIED_TOTAL
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_ip_shadow_blocks_applied_total",
+                    "Total IP shadow blocks applied",
+                    &[],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        IP_BLOCK_ENFORCEMENT_TOTAL
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_ip_block_enforcement_total",
+                    "Total IP block enforcement events by endpoint and block type",
+                    &["endpoint", "block_type"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        IP_AUTOMATED_BLOCKING_RATE
+            .set(
+                register_gauge_vec_with_registry!(
+                    "aframp_ip_automated_blocking_rate",
+                    "Rate of automated IP blocking per minute in the last 5 minutes",
+                    &[],
                     r
                 )
                 .unwrap(),
@@ -642,6 +730,8 @@ fn register_all(r: &Registry) {
     cache::register(r);
     database::register(r);
     security::register(r);
+    ip_detection::register(r);
+    crate::ddos::metrics::register(r);
 }
 
 // ---------------------------------------------------------------------------

@@ -3,21 +3,39 @@
 //! Provides request/response logging and error handling middleware
 
 #[cfg(feature = "database")]
-pub mod logging;
+pub mod api_key;
 
 #[cfg(feature = "database")]
 pub mod error;
 
 #[cfg(feature = "database")]
-pub mod rate_limit;
-pub mod metrics;
-pub mod api_key;
+pub mod geo_restriction;
 
+#[cfg(feature = "database")]
+pub mod hmac_signing;
+
+#[cfg(feature = "database")]
+pub mod ip_blocking;
+
+pub mod replay_prevention;
 #[cfg(feature = "database")]
 pub mod scope_middleware;
 #[cfg(feature = "database")]
-pub mod request_integrity;
+pub mod logging;
+
+pub mod metrics;
+
 #[cfg(feature = "database")]
-pub mod hmac_signing;
+pub mod rate_limit;
+
 #[cfg(feature = "database")]
 pub mod replay_prevention;
+
+#[cfg(feature = "database")]
+pub mod request_integrity;
+
+#[cfg(feature = "database")]
+pub mod scope_middleware;
+// Security middleware
+pub mod cors;
+pub mod security;

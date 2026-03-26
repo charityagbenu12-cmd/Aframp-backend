@@ -434,6 +434,32 @@ mod tests {
     }
 }
 
+pub mod signing {
+    use super::*;
+
+    pub const NAMESPACE: &str = "sigkey";
+
+    /// Cached derived signing key: `v1:sigkey:<key_id>`
+    ///
+    /// Stored in Redis with a short TTL to avoid re-deriving HKDF on every request.
+    #[derive(Debug, Clone)]
+    pub struct DerivedKeyCache {
+        pub key_id: String,
+    }
+
+    impl DerivedKeyCache {
+        pub fn new(key_id: impl Into<String>) -> Self {
+            Self { key_id: key_id.into() }
+        }
+    }
+
+    impl fmt::Display for DerivedKeyCache {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}:{}:{}", VERSION, NAMESPACE, self.key_id)
+        }
+    }
+}
+
 pub mod replay {
     use super::*;
 

@@ -142,6 +142,9 @@ async fn resolve_api_key_full(pool: &PgPool, raw_key: &str) -> LookupResult {
         GROUP BY ak.id, ak.is_active, ak.expires_at, c.id, c.consumer_type, c.is_active
         "#,
         hash
+    )
+    .fetch_optional(pool)
+    .await;
 // ─── Key Extraction ───────────────────────────────────────────────────────────
 
 /// Extract the raw API key from `Authorization: Bearer <key>` or `X-API-Key: <key>`.
