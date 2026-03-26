@@ -200,6 +200,11 @@ name = "hmac_signing_test"
 path = "tests/hmac_signing_test.rs"
 required-features = ["database"]
 
+[[test]]
+name = "ddos_integration"
+path = "tests/ddos_integration.rs"
+required-features = ["cache"]
+
 # ---------------------------------------------------------------------------
 # Dev dependencies
 # ---------------------------------------------------------------------------

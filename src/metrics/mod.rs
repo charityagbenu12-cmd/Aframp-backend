@@ -642,6 +642,7 @@ fn register_all(r: &Registry) {
     cache::register(r);
     database::register(r);
     security::register(r);
+    crate::ddos::metrics::register(r);
 }
 
 // ---------------------------------------------------------------------------

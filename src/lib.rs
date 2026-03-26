@@ -81,6 +81,10 @@ pub mod api_keys;
 #[cfg(feature = "database")]
 pub mod metrics;
 
+// DDoS protection and traffic shaping
+#[cfg(feature = "cache")]
+pub mod ddos;
+
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
 #[contracterror]

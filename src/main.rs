@@ -6,6 +6,7 @@ mod chains;
 mod config;
 mod config_validation;
 mod database;
+mod ddos;
 mod error;
 mod health;
 mod logging;
@@ -1182,6 +1183,27 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
     };
 
+    // ── DDoS protection state and admin routes ────────────────────────────────
+    let (ddos_state, ddos_admin_routes) = if let Some(ref cache) = redis_cache {
+        let ddos_config = ddos::config::DdosConfig::from_env();
+        let state = std::sync::Arc::new(ddos::state::DdosState::new(ddos_config, cache.clone()));
+        // Spawn CDN sync background task
+        {
+            let s = state.clone();
+            let interval = state.config.cdn_sync_interval_secs;
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+                loop { ticker.tick().await; s.sync_cdn_blocklist().await; }
+            });
+        }
+        let routes = ddos::admin::ddos_admin_router(state.clone());
+        info!("✅ DDoS protection enabled");
+        (Some(state), routes)
+    } else {
+        info!("⏭️  Skipping DDoS protection (no Redis cache)");
+        (None, Router::new())
+    };
+
     // ── Key rotation routes (Issue #137) ─────────────────────────────────────
     let key_rotation_routes = if let Some(pool) = db_pool.clone() {
         let rotation_state = api::key_rotation::KeyRotationState {
@@ -1292,6 +1314,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(developer_routes)
         .merge(oauth_routes)
         .merge(history_routes)
+        .merge(ddos_admin_routes)
         .with_state(AppState {
             db_pool,
             redis_cache,
@@ -1356,6 +1379,16 @@ async fn main() -> anyhow::Result<()> {
                 crate::middleware::replay_prevention::replay_prevention_middleware,
             ))
             .layer(axum::middleware::from_fn_with_state(rate_limit_state, crate::middleware::rate_limit::rate_limit_middleware))
+    } else {
+        app
+    };
+
+    // Apply DDoS middleware if state was initialised
+    let app = if let Some(ds) = ddos_state {
+        app.layer(axum::middleware::from_fn_with_state(
+            ds,
+            crate::ddos::middleware::ddos_middleware,
+        ))
     } else {
         app
     };
