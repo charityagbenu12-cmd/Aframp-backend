@@ -17,6 +17,9 @@ pub mod hmac_signing;
 #[cfg(feature = "database")]
 pub mod ip_blocking;
 
+pub mod replay_prevention;
+#[cfg(feature = "database")]
+pub mod scope_middleware;
 #[cfg(feature = "database")]
 pub mod logging;
 
@@ -33,3 +36,6 @@ pub mod request_integrity;
 
 #[cfg(feature = "database")]
 pub mod scope_middleware;
+// Security middleware
+pub mod cors;
+pub mod security;

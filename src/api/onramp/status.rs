@@ -3,8 +3,9 @@ use crate::cache::RedisCache;
 use crate::chains::stellar::client::StellarClient;
 use crate::database::repository::Repository;
 use crate::database::transaction_repository::TransactionRepository;
-use crate::error::{AppError, AppErrorKind, DomainError};
+use crate::error::{AppError, AppErrorKind, DomainError, ValidationError};
 use crate::payments::factory::PaymentProviderFactory;
+use crate::payments::types::{StatusRequest, PaymentState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -43,14 +44,35 @@ impl OnrampStatusService {
         }
     }
 
-    /// Get status for a transaction
-    pub async fn get_status(&self, tx_id: &str) -> Result<OnrampStatusResponse, AppError> {
+    /// Get status for a transaction with ownership verification
+    pub async fn get_status(&self, tx_id: &str, requesting_wallet: Option<&str>) -> Result<OnrampStatusResponse, AppError> {
+        // Validate transaction ID format
+        if let Err(_) = Uuid::parse_str(tx_id) {
+            return Err(AppError::new(AppErrorKind::Validation(
+                ValidationError::InvalidFormat {
+                    field: "tx_id".to_string(),
+                    expected: "UUID".to_string(),
+                    got: tx_id.to_string(),
+                },
+            )));
+        }
+
         // Check cache first
         let cache_key = format!("api:onramp:status:{}", tx_id);
         let cached_result: Result<Option<OnrampStatusResponse>, _> = self.cache.get(&cache_key).await;
         
         if let Ok(Some(cached)) = cached_result {
             debug!("Cache hit for onramp status: {}", tx_id);
+            
+            // Still need to verify ownership for cached responses
+            if let Some(wallet) = requesting_wallet {
+                if cached.transaction.wallet_address != wallet {
+                    return Err(AppError::new(AppErrorKind::Domain(DomainError::Forbidden {
+                        message: "Transaction does not belong to the requesting wallet".to_string(),
+                    })));
+                }
+            }
+            
             return Ok(cached);
         }
 
@@ -74,6 +96,15 @@ impl OnrampStatusService {
                 })));
             }
         };
+
+        // Verify ownership if wallet is provided
+        if let Some(wallet) = requesting_wallet {
+            if tx.wallet_address != wallet {
+                return Err(AppError::new(AppErrorKind::Domain(DomainError::Forbidden {
+                    message: "Transaction does not belong to the requesting wallet".to_string(),
+                })));
+            }
+        }
 
         // Build response
         let response = self.build_status_response(tx_id, &tx).await?;
@@ -119,8 +150,8 @@ impl OnrampStatusService {
             },
         };
 
-        // Check provider status for pending transactions
-        let provider_status = if status == "pending" {
+        // Check provider status for pending/processing transactions
+        let provider_status = if matches!(status.as_str(), "pending" | "processing") {
             self.check_provider_status(&tx.payment_provider, &tx.payment_reference)
                 .await
         } else {
@@ -128,7 +159,7 @@ impl OnrampStatusService {
         };
 
         // Check blockchain status for processing/completed transactions
-        let blockchain_status = if status == "processing" || status == "completed" {
+        let blockchain_status = if matches!(status.as_str(), "processing" | "completed") {
             self.check_blockchain_status(&tx.blockchain_tx_hash).await
         } else {
             None
@@ -150,7 +181,7 @@ impl OnrampStatusService {
         })
     }
 
-    /// Check payment provider status
+    /// Check payment provider status with timeout handling
     async fn check_provider_status(
         &self,
         provider: &Option<String>,
@@ -159,33 +190,119 @@ impl OnrampStatusService {
         let provider_name = provider.as_ref()?;
         let payment_reference = reference.as_ref()?;
 
-        // For now, return a placeholder status
-        // In a full implementation, this would query the provider
-        Some(ProviderStatus {
-            confirmed: false,
+        debug!("Checking provider status for {} with reference {}", provider_name, payment_reference);
+
+        // Get provider instance
+        let provider_name_enum = match provider_name.parse::<crate::payments::types::ProviderName>() {
+            Ok(name) => name,
+            Err(e) => {
+                warn!("Invalid provider name {}: {}", provider_name, e);
+                return Some(ProviderStatus {
+                    confirmed: false,
+                    reference: payment_reference.clone(),
+                    checked_at: Utc::now(),
+                    stale: true,
+                    error: Some(format!("Invalid provider: {}", provider_name)),
+                });
+            }
+        };
+
+        let provider_instance = match self.payment_factory.get_provider(provider_name_enum) {
+            Ok(provider) => provider,
+            Err(e) => {
+                warn!("Failed to get provider instance for {}: {}", provider_name, e);
+                return Some(ProviderStatus {
+                    confirmed: false,
+                    reference: payment_reference.clone(),
+                    checked_at: Utc::now(),
+                    stale: true,
+                    error: Some(format!("Provider unavailable: {}", e)),
+                });
+            }
+        };
+
+        // Create status request
+        let status_request = StatusRequest {
             reference: payment_reference.clone(),
-            checked_at: Utc::now(),
-        })
+            provider_data: None,
+        };
+
+        // Query provider with timeout
+        let timeout_duration = Duration::from_secs(10);
+        let provider_result = tokio::time::timeout(
+            timeout_duration,
+            provider_instance.get_payment_status(status_request)
+        ).await;
+
+        match provider_result {
+            Ok(Ok(status_response)) => {
+                let confirmed = matches!(status_response.state, PaymentState::Completed | PaymentState::Confirmed);
+                Some(ProviderStatus {
+                    confirmed,
+                    reference: payment_reference.clone(),
+                    checked_at: Utc::now(),
+                    stale: false,
+                    error: None,
+                })
+            }
+            Ok(Err(e)) => {
+                warn!("Provider status check failed for {}: {}", payment_reference, e);
+                Some(ProviderStatus {
+                    confirmed: false,
+                    reference: payment_reference.clone(),
+                    checked_at: Utc::now(),
+                    stale: true,
+                    error: Some(format!("Provider error: {}", e)),
+                })
+            }
+            Err(_) => {
+                warn!("Provider status check timed out for {}", payment_reference);
+                Some(ProviderStatus {
+                    confirmed: false,
+                    reference: payment_reference.clone(),
+                    checked_at: Utc::now(),
+                    stale: true,
+                    error: Some("Provider timeout".to_string()),
+                })
+            }
+        }
     }
 
-    /// Check blockchain status
+    /// Check blockchain status with Stellar Horizon
     async fn check_blockchain_status(
         &self,
         tx_hash: &Option<String>,
     ) -> Option<BlockchainStatus> {
         let hash = tx_hash.as_ref()?;
 
-        // For now, return a placeholder status
-        // In a full implementation, this would query the Stellar blockchain
-        let explorer_url = format!("https://stellar.expert/explorer/public/tx/{}", hash);
+        debug!("Checking blockchain status for transaction {}", hash);
 
-        Some(BlockchainStatus {
-            stellar_tx_hash: hash.clone(),
-            confirmations: 1,
-            confirmed: true,
-            explorer_url,
-            checked_at: Utc::now(),
-        })
+        // Query Stellar Horizon for transaction details
+        match self.stellar_client.get_transaction_details(hash).await {
+            Ok(tx_details) => {
+                let explorer_url = format!("https://stellar.expert/explorer/public/tx/{}", hash);
+                Some(BlockchainStatus {
+                    stellar_tx_hash: hash.clone(),
+                    confirmations: tx_details.ledger.map(|l| l as u32).unwrap_or(0),
+                    confirmed: tx_details.successful,
+                    explorer_url,
+                    checked_at: Utc::now(),
+                    stale: false,
+                })
+            }
+            Err(e) => {
+                warn!("Failed to check blockchain status for {}: {}", hash, e);
+                let explorer_url = format!("https://stellar.expert/explorer/public/tx/{}", hash);
+                Some(BlockchainStatus {
+                    stellar_tx_hash: hash.clone(),
+                    confirmations: 0,
+                    confirmed: false,
+                    explorer_url,
+                    checked_at: Utc::now(),
+                    stale: true,
+                })
+            }
+        }
     }
 }
 
@@ -196,7 +313,9 @@ pub async fn get_onramp_status(
 ) -> Result<impl IntoResponse, AppError> {
     info!("GET /api/onramp/status/{}", tx_id);
 
-    let response = service.get_status(&tx_id).await?;
+    // For now, we don't enforce ownership check at the API level
+    // In a production system, you'd extract the wallet from JWT claims or API key
+    let response = service.get_status(&tx_id, None).await?;
 
     Ok((StatusCode::OK, Json(response)))
 }
@@ -285,6 +404,9 @@ pub struct ProviderStatus {
     pub confirmed: bool,
     pub reference: String,
     pub checked_at: DateTime<Utc>,
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Blockchain status
@@ -295,6 +417,7 @@ pub struct BlockchainStatus {
     pub confirmed: bool,
     pub explorer_url: String,
     pub checked_at: DateTime<Utc>,
+    pub stale: bool,
 }
 
 /// Timeline entry

@@ -49,6 +49,10 @@ pub mod payments;
 #[cfg(feature = "database")]
 pub mod config;
 
+// Admin access control system
+#[cfg(feature = "database")]
+pub mod admin;
+
 // API handlers (exposed for integration tests)
 #[cfg(feature = "database")]
 pub mod api;
@@ -80,6 +84,10 @@ pub mod api_keys;
 // Prometheus metrics
 #[cfg(feature = "database")]
 pub mod metrics;
+
+// DDoS protection and traffic shaping
+#[cfg(feature = "cache")]
+pub mod ddos;
 
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]

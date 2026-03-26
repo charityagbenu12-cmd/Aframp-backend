@@ -8,6 +8,9 @@ pub enum StellarError {
     #[error("Account not found: {address}")]
     AccountNotFound { address: String },
 
+    #[error("Transaction not found: {hash}")]
+    TransactionNotFound { hash: String },
+
     #[error("Invalid Stellar address: {address}")]
     InvalidAddress { address: String },
 
@@ -50,6 +53,12 @@ impl StellarError {
     pub fn account_not_found(address: impl Into<String>) -> Self {
         Self::AccountNotFound {
             address: address.into(),
+        }
+    }
+
+    pub fn transaction_not_found(hash: impl Into<String>) -> Self {
+        Self::TransactionNotFound {
+            hash: hash.into(),
         }
     }
 

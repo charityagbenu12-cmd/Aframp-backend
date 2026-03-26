@@ -539,22 +539,17 @@ pub mod database {
 }
 
 // ---------------------------------------------------------------------------
-<<<<<<< feat/request-integrity-149
 // Security metrics
-=======
 // Security / replay-prevention metrics  (Issue #141)
->>>>>>> master
 // ---------------------------------------------------------------------------
 
 pub mod security {
     use super::*;
 
-<<<<<<< feat/request-integrity-149
     static REQUEST_ANOMALY_FLAGS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
 
     pub fn request_anomaly_flags_total() -> &'static CounterVec {
         REQUEST_ANOMALY_FLAGS_TOTAL
-=======
     static REPLAY_ATTEMPTS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
     static TIMESTAMP_REJECTIONS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
     static TIMESTAMP_DELTA_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
@@ -576,20 +571,17 @@ pub mod security {
     /// Histogram of |server_time − request_timestamp| for valid requests.
     pub fn timestamp_delta_seconds() -> &'static HistogramVec {
         TIMESTAMP_DELTA_SECONDS
->>>>>>> master
             .get()
             .expect("metrics not initialised")
     }
 
     pub(super) fn register(r: &Registry) {
-<<<<<<< feat/request-integrity-149
         REQUEST_ANOMALY_FLAGS_TOTAL
             .set(
                 register_counter_vec_with_registry!(
                     "aframp_request_anomaly_flags_total",
                     "Total non-blocking request anomaly flags by consumer, endpoint, and field",
                     &["consumer_id", "endpoint", "field"],
-=======
         REPLAY_ATTEMPTS_TOTAL
             .set(
                 register_counter_vec_with_registry!(
@@ -621,7 +613,6 @@ pub mod security {
                     "Distribution of |server_time - request_timestamp| for accepted requests",
                     &["consumer_id"],
                     vec![0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
->>>>>>> master
                     r
                 )
                 .unwrap(),
@@ -740,6 +731,7 @@ fn register_all(r: &Registry) {
     database::register(r);
     security::register(r);
     ip_detection::register(r);
+    crate::ddos::metrics::register(r);
 }
 
 // ---------------------------------------------------------------------------

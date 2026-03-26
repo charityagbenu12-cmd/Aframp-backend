@@ -20,11 +20,37 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["database", "cache"]
 integration = []
-database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui", "dep:jsonwebtoken" ]
+database = [ 
+    "dep:tokio", 
+    "dep:async-trait", 
+    "dep:uuid", 
+    "dep:chrono", 
+    "dep:serde", 
+    "dep:serde_json", 
+    "dep:tracing", 
+    "dep:tracing-subscriber", 
+    "dep:axum", 
+    "dep:tower", 
+    "dep:tower-http", 
+    "dep:regex", 
+    "dep:http", 
+    "dep:sqlx", 
+    "dep:hmac", 
+    "dep:sha2", 
+    "dep:hex", 
+    "dep:bigdecimal", 
+    "dep:rust_decimal", 
+    "dep:stellar-strkey", 
+    "dep:ed25519-dalek", 
+    "dep:stellar-xdr", 
+    "dep:utoipa", 
+    "dep:utoipa-swagger-ui", 
+    "dep:jsonwebtoken",
+    "dep:argon2", 
+    "dep:rand"
+]
+database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui", "dep:argon2", "dep:rand", "dep:bcrypt", "dep:totp-rs", "dep:webauthn-rs", "dep:sha1", "dep:jsonwebtoken" ]
 cache = ["dep:redis", "dep:bb8", "dep:bb8-redis", "dep:moka", "dep:prometheus", "dep:tokio-util", "database"]
-database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:jsonwebtoken" ]
-database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui", "dep:argon2", "dep:rand", "dep:maxminddb" ]
-cache = ["dep:redis", "dep:bb8", "dep:bb8-redis", "dep:moka", "dep:tokio-util", "database"]
 
 # Distributed tracing via OpenTelemetry (Issue #104).
 # Enables OTLP export to Jaeger / Grafana Tempo, W3C trace-context propagation,
@@ -69,11 +95,7 @@ serde      = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0",                        optional = true }
 
 # --- Database ---
-sqlx = {
-    version  = "0.8.6",
-    features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "bigdecimal"],
-    optional = true,
-}
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "bigdecimal"], optional = true }
 
 # In-process L1 cache
 moka = { version = "0.12", features = ["future"], optional = true }
@@ -99,6 +121,7 @@ argon2 = { version = "0.5",  optional = true }
 rand   = { version = "0.8",  features = ["std"], optional = true }
 sha2 = { version = "0.10", optional = true }
 hex  = { version = "0.4",  optional = true }
+bcrypt = { version = "0.15", optional = true }
 
 # --- HTTP client (outbound calls — payment providers, Horizon, rate APIs) ---
 # reqwest 0.13 ships with a built-in connection pool and supports injecting
@@ -125,6 +148,11 @@ utoipa-swagger-ui = { version = "8", features = ["axum"], optional = true }
 
 # Prometheus metrics
 prometheus = { version = "0.13", features = ["process"], optional = true }
+
+# Additional crypto dependencies for admin auth
+totp-rs = { version = "5.1", optional = true }
+webauthn-rs = { version = "0.5", optional = true }
+sha1 = { version = "0.10", optional = true }
 
 # ---------------------------------------------------------------------------
 # Tracing — base layer (optional via "database" feature)
@@ -202,6 +230,11 @@ required-features = ["database"]
 name = "hmac_signing_test"
 path = "tests/hmac_signing_test.rs"
 required-features = ["database"]
+
+[[test]]
+name = "ddos_integration"
+path = "tests/ddos_integration.rs"
+required-features = ["cache"]
 
 # ---------------------------------------------------------------------------
 # Dev dependencies
