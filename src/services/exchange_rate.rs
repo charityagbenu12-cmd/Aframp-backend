@@ -283,6 +283,16 @@ impl ExchangeRateService {
             let _ = <RedisCache as Cache<RateData>>::delete(cache, &cache_key.to_string()).await;
         }
 
+        // Update exchange rate staleness metric for alert rules
+        #[cfg(feature = "cache")]
+        {
+            let currency_pair = format!("{}/{}", from_currency, to_currency);
+            let now = chrono::Utc::now().timestamp() as f64;
+            crate::metrics::alerting::exchange_rate_last_updated()
+                .with_label_values(&[&currency_pair])
+                .set(now);
+        }
+
         debug!(
             "Updated rate: {} -> {} = {} (source: {})",
             from_currency, to_currency, rate, source

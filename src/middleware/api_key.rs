@@ -145,6 +145,41 @@ async fn resolve_api_key_full(pool: &PgPool, raw_key: &str) -> LookupResult {
     )
     .fetch_optional(pool)
     .await;
+
+    match row {
+        Err(_) => LookupResult::NotFound,
+        Ok(None) => LookupResult::NotFound,
+        Ok(Some(r)) => {
+            let now = Utc::now();
+            if !r.is_active {
+                return LookupResult::NotFound;
+            }
+            if let Some(exp) = r.expires_at {
+                if exp < now {
+                    let grace_end = exp + chrono::Duration::hours(24);
+                    return LookupResult::Expired {
+                        auth: AuthenticatedKey {
+                            key_id: r.key_id,
+                            consumer_id: r.consumer_id,
+                            consumer_type: r.consumer_type,
+                            scopes: r.scopes.unwrap_or_default(),
+                            environment: String::new(),
+                        },
+                        grace_end,
+                    };
+                }
+            }
+            LookupResult::Valid(AuthenticatedKey {
+                key_id: r.key_id,
+                consumer_id: r.consumer_id,
+                consumer_type: r.consumer_type,
+                scopes: r.scopes.unwrap_or_default(),
+                environment: String::new(),
+            })
+        }
+    }
+}
+
 // ─── Key Extraction ───────────────────────────────────────────────────────────
 
 /// Extract the raw API key from `Authorization: Bearer <key>` or `X-API-Key: <key>`.

@@ -216,6 +216,12 @@ impl PaymentPollerWorker {
             metrics().checked.inc();
             self.process_one(tx).await;
         }
+
+        // Update last-cycle timestamp for missed-cycle alert rule
+        #[cfg(feature = "cache")]
+        crate::metrics::alerting::worker_last_cycle_timestamp()
+            .with_label_values(&["payment_poller"])
+            .set(chrono::Utc::now().timestamp() as f64);
     }
 
     async fn process_one(&self, tx: &Transaction) {

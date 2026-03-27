@@ -161,7 +161,13 @@ pub async fn rate_limit_middleware(
 
     if count >= limit_conf.limit {
         warn!(key = %redis_key, count = count, limit = limit_conf.limit, "Rate limit exceeded");
-        
+
+        // Emit metric for alert rule: aframp_rate_limit_breaches_total
+        #[cfg(feature = "cache")]
+        crate::metrics::alerting::rate_limit_breaches_total()
+            .with_label_values(&[&path])
+            .inc();
+
         let response_body = json!({
             "error": {
                 "code": "RATE_LIMIT_EXCEEDED",

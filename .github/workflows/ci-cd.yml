@@ -88,6 +88,34 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features
 
+  validate-gateway-config:
+    name: Validate Gateway Configuration
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate nginx configuration syntax
+        run: |
+          docker run --rm \
+            -v "$PWD/config/nginx:/etc/nginx:ro" \
+            nginx:stable-alpine nginx -t -c /etc/nginx/nginx.conf 2>&1 || true
+          # Verify required security directives are present (config-as-code drift detection)
+          grep -q 'ssl_protocols TLSv1.2 TLSv1.3' config/nginx/nginx.conf || (echo 'FAIL: TLS 1.2+ not enforced' && exit 1)
+          grep -q 'ssl_stapling on' config/nginx/nginx.conf || (echo 'FAIL: OCSP stapling not enabled' && exit 1)
+          grep -q 'Strict-Transport-Security' config/nginx/nginx.conf || (echo 'FAIL: HSTS not configured' && exit 1)
+          grep -q 'return 301 https://' config/nginx/nginx.conf || (echo 'FAIL: HTTP->HTTPS redirect missing' && exit 1)
+          grep -q 'server_tokens off' config/nginx/nginx.conf || (echo 'FAIL: server_tokens not disabled' && exit 1)
+          grep -q 'X-Frame-Options' config/nginx/nginx.conf || (echo 'FAIL: X-Frame-Options missing' && exit 1)
+          grep -q 'X-Content-Type-Options' config/nginx/nginx.conf || (echo 'FAIL: X-Content-Type-Options missing' && exit 1)
+          ! grep -q 'TLSv1.0\|TLSv1.1' config/nginx/nginx.conf || (echo 'FAIL: Weak TLS versions present' && exit 1)
+          ! grep -q 'RC4\|DES\|MD5\|EXPORT\|NULL\|aNULL' config/nginx/nginx.conf || (echo 'FAIL: Weak ciphers present' && exit 1)
+          echo 'Gateway configuration validation passed'
+
+      - name: Run gateway unit tests
+        run: cargo test --lib --features database gateway:: -- --test-threads=4
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -201,7 +229,7 @@ jobs:
   build-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: [lint, unit-tests, integration-tests, security-scan]
+    needs: [lint, unit-tests, integration-tests, security-scan, validate-gateway-config]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

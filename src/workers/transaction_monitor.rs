@@ -184,6 +184,13 @@ impl TransactionMonitorWorker {
             .inc();
         self.process_pending_transactions().await?;
         self.scan_incoming_transactions().await?;
+
+        // Update last-cycle timestamp for missed-cycle alert rule
+        #[cfg(feature = "cache")]
+        crate::metrics::alerting::worker_last_cycle_timestamp()
+            .with_label_values(&["transaction_monitor"])
+            .set(chrono::Utc::now().timestamp() as f64);
+
         Ok(())
     }
 
@@ -199,6 +206,19 @@ impl TransactionMonitorWorker {
                 self.config.pending_batch_size,
             )
             .await?;
+
+        // Update stale pending transaction gauge for alert rules.
+        // A transaction is "stale" if it has exceeded the configured pending timeout.
+        #[cfg(feature = "cache")]
+        {
+            let stale_count = pending
+                .iter()
+                .filter(|tx| is_timed_out(tx.created_at, self.config.pending_timeout))
+                .count() as f64;
+            crate::metrics::alerting::pending_transactions_stale()
+                .with_label_values(&["all"])
+                .set(stale_count);
+        }
 
         for tx in pending {
             let tx_id = tx.transaction_id.to_string();

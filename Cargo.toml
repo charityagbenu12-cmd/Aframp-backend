@@ -20,36 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["database", "cache"]
 integration = []
-database = [ 
-    "dep:tokio", 
-    "dep:async-trait", 
-    "dep:uuid", 
-    "dep:chrono", 
-    "dep:serde", 
-    "dep:serde_json", 
-    "dep:tracing", 
-    "dep:tracing-subscriber", 
-    "dep:axum", 
-    "dep:tower", 
-    "dep:tower-http", 
-    "dep:regex", 
-    "dep:http", 
-    "dep:sqlx", 
-    "dep:hmac", 
-    "dep:sha2", 
-    "dep:hex", 
-    "dep:bigdecimal", 
-    "dep:rust_decimal", 
-    "dep:stellar-strkey", 
-    "dep:ed25519-dalek", 
-    "dep:stellar-xdr", 
-    "dep:utoipa", 
-    "dep:utoipa-swagger-ui", 
-    "dep:jsonwebtoken",
-    "dep:argon2", 
-    "dep:rand"
-]
-database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui", "dep:argon2", "dep:rand", "dep:bcrypt", "dep:totp-rs", "dep:webauthn-rs", "dep:sha1", "dep:jsonwebtoken", "dep:openssl" ]
+database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui", "dep:argon2", "dep:rand", "dep:bcrypt", "dep:totp-rs", "dep:webauthn-rs", "dep:sha1", "dep:jsonwebtoken", "dep:openssl", "dep:aes-gcm", "dep:p384", "dep:elliptic-curve", "dep:hkdf", "dep:zeroize" ]
 cache = ["dep:redis", "dep:bb8", "dep:bb8-redis", "dep:moka", "dep:prometheus", "dep:tokio-util", "database"]
 
 # Distributed tracing via OpenTelemetry (Issue #104).
@@ -173,6 +144,13 @@ rsa = { version = "0.9", features = ["sha2", "pem"], optional = true }
 # OpenSSL for mTLS certificate generation
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 
+# Payload encryption (Issue — Data Security & Encryption)
+aes-gcm   = { version = "0.10", optional = true }
+p384      = { version = "0.13", features = ["ecdh", "pem"], optional = true }
+elliptic-curve = { version = "0.13", optional = true }
+hkdf      = { version = "0.12", optional = true }
+zeroize   = { version = "1.7", features = ["derive"], optional = true }
+
 # MaxMind GeoIP2 for IP geolocation
 maxminddb = { version = "0.24", optional = true }
 
@@ -239,6 +217,19 @@ name = "ddos_integration"
 path = "tests/ddos_integration.rs"
 required-features = ["cache"]
 
+[[test]]
+name = "pentest_integration"
+path = "tests/pentest_integration.rs"
+required-features = ["integration"]
+
+# ---------------------------------------------------------------------------
+# Integration test — API gateway security policy enforcement
+# ---------------------------------------------------------------------------
+[[test]]
+name = "gateway_integration"
+path = "tests/gateway_integration.rs"
+required-features = ["database"]
+
 # ---------------------------------------------------------------------------
 # Dev dependencies
 # ---------------------------------------------------------------------------
@@ -251,3 +242,13 @@ sha2 = "0.10"
 hex = "0.4"
 tokio       = { version = "1.49.0", features = ["full"] }
 tokio-test  = "0.4"
+
+[[test]]
+name = "payload_encryption_test"
+path = "tests/payload_encryption_test.rs"
+required-features = ["database"]
+
+[[test]]
+name = "key_management_test"
+path = "tests/key_management_test.rs"
+required-features = ["database"]

@@ -148,6 +148,18 @@ pub fn validate_production_config() -> Result<(), ConfigValidationError> {
     }
 
     // -------------------------------------------------------------------------
+    // Debug mode must be disabled in production
+    // -------------------------------------------------------------------------
+    if is_production {
+        let debug = env::var("DEBUG_MODE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if debug {
+            errors.push("DEBUG_MODE must be false in production — disabling immediately".into());
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Mock payments must be disabled in non-dev
     // -------------------------------------------------------------------------
     if is_non_dev {

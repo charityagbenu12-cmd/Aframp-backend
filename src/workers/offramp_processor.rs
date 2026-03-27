@@ -397,6 +397,12 @@ impl OfframpProcessorWorker {
             error!(error = %e, "failed to process refunds");
         }
 
+        // Update last-cycle timestamp for missed-cycle alert rule
+        #[cfg(feature = "cache")]
+        crate::metrics::alerting::worker_last_cycle_timestamp()
+            .with_label_values(&["offramp_processor"])
+            .set(chrono::Utc::now().timestamp() as f64);
+
         Ok(())
     }
 

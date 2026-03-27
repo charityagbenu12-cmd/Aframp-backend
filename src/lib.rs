@@ -38,9 +38,6 @@ pub mod cache;
 #[cfg(feature = "database")]
 pub mod services;
 
-#[cfg(feature = "database")]
-pub mod recurring;
-
 // Payment providers
 #[cfg(feature = "database")]
 pub mod payments;
@@ -56,6 +53,11 @@ pub mod config;
 // Admin access control system
 #[cfg(feature = "database")]
 pub mod admin;
+
+// Data classification framework — authoritative sensitivity taxonomy and
+// policy enforcement for every data field on the platform.
+#[cfg(feature = "database")]
+pub mod data_classification;
 
 // API handlers (exposed for integration tests)
 #[cfg(feature = "database")]
@@ -96,6 +98,26 @@ pub mod ddos;
 // Microservice-to-microservice authentication
 #[cfg(feature = "database")]
 pub mod service_auth;
+
+// End-to-end payload encryption (Issue — Data Security & Encryption)
+#[cfg(feature = "database")]
+pub mod crypto;
+
+// Platform key management framework (Issue — Key Management & Rotation)
+#[cfg(feature = "database")]
+pub mod key_management;
+
+// Penetration testing & security review framework
+#[cfg(feature = "database")]
+pub mod pentest;
+
+// Data masking & redaction system
+#[cfg(feature = "database")]
+pub mod masking;
+
+// API gateway security policy enforcement
+#[cfg(feature = "database")]
+pub mod gateway;
 
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
