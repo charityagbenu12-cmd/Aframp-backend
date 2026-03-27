@@ -550,6 +550,10 @@ pub mod security {
 
     pub fn request_anomaly_flags_total() -> &'static CounterVec {
         REQUEST_ANOMALY_FLAGS_TOTAL
+            .get()
+            .expect("metrics not initialised")
+    }
+
     static REPLAY_ATTEMPTS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
     static TIMESTAMP_REJECTIONS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
     static TIMESTAMP_DELTA_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
@@ -582,6 +586,12 @@ pub mod security {
                     "aframp_request_anomaly_flags_total",
                     "Total non-blocking request anomaly flags by consumer, endpoint, and field",
                     &["consumer_id", "endpoint", "field"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
         REPLAY_ATTEMPTS_TOTAL
             .set(
                 register_counter_vec_with_registry!(
@@ -732,6 +742,7 @@ fn register_all(r: &Registry) {
     security::register(r);
     ip_detection::register(r);
     crate::ddos::metrics::register(r);
+    crate::crypto::metrics::register(r);
 }
 
 // ---------------------------------------------------------------------------

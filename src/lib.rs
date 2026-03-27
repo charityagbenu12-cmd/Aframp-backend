@@ -38,9 +38,6 @@ pub mod cache;
 #[cfg(feature = "database")]
 pub mod services;
 
-#[cfg(feature = "database")]
-pub mod recurring;
-
 // Payment providers
 #[cfg(feature = "database")]
 pub mod payments;
@@ -92,6 +89,10 @@ pub mod metrics;
 // DDoS protection and traffic shaping
 #[cfg(feature = "cache")]
 pub mod ddos;
+
+// End-to-end payload encryption (Issue — Data Security & Encryption)
+#[cfg(feature = "database")]
+pub mod crypto;
 
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
