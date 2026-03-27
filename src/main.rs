@@ -13,6 +13,7 @@ mod health;
 mod logging;
 mod metrics;
 mod middleware;
+mod mtls;
 mod oauth;
 mod payments;
 mod recurring;
@@ -1268,6 +1269,98 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
     };
 
+    // ── mTLS certificate lifecycle — Issue #204 ───────────────────────────────
+    // Provision the intermediate CA and start the lifecycle worker.
+    // The admin routes are always available (they operate on the in-memory store).
+    let mtls_admin_routes = {
+        use mtls::{
+            MtlsConfig, IntermediateCa, CertificateStore, CertificateProvisioner,
+            RevocationService, CertLifecycleWorker,
+        };        use mtls::revocation::RevocationList;
+        use mtls::admin::{MtlsAdminState, mtls_admin_routes};
+
+        let mtls_config = MtlsConfig::from_env().unwrap_or_else(|e| {
+            tracing::warn!("mTLS config error (using defaults): {}", e);
+            MtlsConfig::from_env().unwrap_or_else(|_| MtlsConfig {
+                service_name: "aframp-backend".to_string(),
+                environment: std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string()),
+                leaf_cert_validity: std::time::Duration::from_secs(90 * 86400),
+                intermediate_cert_validity: std::time::Duration::from_secs(730 * 86400),
+                rotation_threshold_days: 14,
+                alert_threshold_days: 7,
+                intermediate_ca_cert_pem: String::new(),
+                intermediate_ca_key_pem: String::new(),
+                root_ca_cert_pem: String::new(),
+                ca_distribution_url: String::new(),
+                enforce_mtls: false,
+            })
+        });
+
+        // Register mTLS Prometheus metrics
+        mtls::metrics::register(prometheus::default_registry());
+
+        let cert_store = CertificateStore::new();
+        let crl = RevocationList::new();
+        let revocation_svc = std::sync::Arc::new(RevocationService::new(crl, cert_store.clone()));
+
+        // Only start the CA and provisioner if the intermediate CA PEM is configured.
+        let provisioner = if !mtls_config.intermediate_ca_cert_pem.is_empty() {
+            match IntermediateCa::from_pem(&mtls_config) {
+                Ok(ca) => {
+                    let ca = std::sync::Arc::new(ca);
+                    let p = std::sync::Arc::new(CertificateProvisioner::new(
+                        ca,
+                        cert_store.clone(),
+                        revocation_svc.clone(),
+                        mtls_config.clone(),
+                    ));
+                    // Provision all registered services at startup
+                    for &svc in mtls::cert::REGISTERED_SERVICES {
+                        match p.provision_at_startup(svc) {
+                            Ok(cert) => info!(
+                                service = svc,
+                                serial = %cert.serial,
+                                expires_at = %cert.expires_at,
+                                "mTLS: startup certificate provisioned"
+                            ),
+                            Err(e) => tracing::warn!(service = svc, error = %e, "mTLS: startup provisioning failed"),
+                        }
+                    }
+                    // Start the lifecycle worker (14-day rotation sweep)
+                    let worker = CertLifecycleWorker::new(p.clone(), cert_store.clone(), mtls_config.clone());
+                    tokio::spawn(worker.run(worker_shutdown_rx.clone()));
+                    info!("✅ mTLS certificate lifecycle worker started");
+                    p
+                }
+                Err(e) => {
+                    tracing::warn!("mTLS: intermediate CA not loaded ({}); admin endpoints available but no auto-provisioning", e);
+                    std::sync::Arc::new(CertificateProvisioner::without_ca(
+                        cert_store.clone(),
+                        revocation_svc.clone(),
+                        mtls_config.clone(),
+                    ))
+                }
+            }
+        } else {
+            info!("mTLS: MTLS_INTERMEDIATE_CA_CERT_PEM not set — certificate auto-provisioning disabled");
+            std::sync::Arc::new(CertificateProvisioner::without_ca(
+                cert_store.clone(),
+                revocation_svc.clone(),
+                mtls_config.clone(),
+            ))
+        };
+
+        let mtls_state = std::sync::Arc::new(MtlsAdminState {
+            store: cert_store,
+            provisioner,
+            revocation: revocation_svc,
+        });
+
+        mtls_admin_routes()
+            .with_state(mtls_state)
+            .route_layer(axum::middleware::from_fn(security_headers_middleware))
+    };
+
     // ── DDoS protection state and admin routes ────────────────────────────────
     let (ddos_state, ddos_admin_routes) = if let Some(ref cache) = redis_cache {
         let ddos_config = ddos::config::DdosConfig::from_env();
@@ -1449,6 +1542,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(history_routes)
         .merge(ddos_admin_routes)
         .merge(developer_portal::routes::register_developer_portal_routes(Router::new(), db_pool.clone()))
+        .merge(Router::new().nest("/api/admin/security", mtls_admin_routes))
         .with_state(AppState {
             db_pool,
             redis_cache,
