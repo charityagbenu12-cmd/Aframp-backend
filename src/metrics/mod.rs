@@ -852,6 +852,7 @@ fn register_all(r: &Registry) {
     crate::pentest::metrics::register(r);
     crate::masking::metrics::register(r);
     crate::gateway::metrics::register(r);
+    crate::adaptive_rate_limit::metrics::register(r);
     #[cfg(feature = "database")]
 }
 

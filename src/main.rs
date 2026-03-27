@@ -1,3 +1,4 @@
+mod adaptive_rate_limit;
 mod api;
 mod api_keys;
 mod audit;
@@ -1293,6 +1294,43 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
     };
 
+    // ── Adaptive rate limit admin routes ─────────────────────────────────────
+    let adaptive_rl_admin_routes = if let (Some(pool), Some(cache)) = (db_pool.clone(), redis_cache.clone()) {
+        let rl_cfg = crate::adaptive_rate_limit::config::AdaptiveRateLimitConfig::from_env();
+        let signals = std::sync::Arc::new(
+            crate::adaptive_rate_limit::signals::SignalCollector::new(
+                std::sync::Arc::new(cache.clone()),
+                pool.clone(),
+                rl_cfg.rolling_window_size,
+            ),
+        );
+        let rl_repo = crate::adaptive_rate_limit::repository::AdaptiveRateLimitRepository::new(pool.clone());
+        let rl_engine = std::sync::Arc::new(
+            crate::adaptive_rate_limit::engine::AdaptiveRateLimitEngine::new(
+                rl_cfg,
+                signals,
+                std::sync::Arc::new(cache.clone()),
+                rl_repo,
+            ),
+        );
+        let admin_state = crate::adaptive_rate_limit::handlers::AdaptiveRateLimitAdminState {
+            engine: rl_engine,
+        };
+        Router::new()
+            .route(
+                "/api/admin/adaptive-rate-limit/status",
+                get(crate::adaptive_rate_limit::handlers::get_status),
+            )
+            .route(
+                "/api/admin/adaptive-rate-limit/override",
+                post(crate::adaptive_rate_limit::handlers::set_override)
+                    .delete(crate::adaptive_rate_limit::handlers::clear_override),
+            )
+            .with_state(admin_state)
+    } else {
+        Router::new()
+    };
+
     // ── mTLS certificate lifecycle — Issue #204 ───────────────────────────────
     // Provision the intermediate CA and start the lifecycle worker.
     // The admin routes are always available (they operate on the in-memory store).
@@ -1557,7 +1595,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth_routes)
         .merge(batch_routes)
         .merge(admin_routes)
-        .merge(key_rotation_routes)
+        .merge(adaptive_rl_admin_routes)
         .merge(openapi_routes)
         .merge(recurring_routes)
     let app = Router::new()
@@ -1605,6 +1643,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth_routes)
         .merge(batch_routes)
         .merge(admin_routes)
+        .merge(adaptive_rl_admin_routes)
         .merge(audit_routes)
         .merge(key_rotation_routes)
         .merge(openapi_routes)
@@ -1707,6 +1746,63 @@ async fn main() -> anyhow::Result<()> {
         let replay_state = crate::middleware::replay_prevention::ReplayPreventionState {
             redis: std::sync::Arc::new(cache.pool.clone()),
             config: std::sync::Arc::new(crate::middleware::replay_prevention::ReplayConfig::from_env()),
+        };
+
+        // ── Adaptive rate limiting ────────────────────────────────────────────
+        let adaptive_rl_enabled = std::env::var("ADAPTIVE_RL_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .to_lowercase()
+            != "false";
+
+        let app = if adaptive_rl_enabled {
+            if let Some(ref pool) = db_pool {
+                let rl_cfg = crate::adaptive_rate_limit::config::AdaptiveRateLimitConfig::from_env();
+                let signals = std::sync::Arc::new(
+                    crate::adaptive_rate_limit::signals::SignalCollector::new(
+                        std::sync::Arc::new(cache.clone()),
+                        pool.clone(),
+                        rl_cfg.rolling_window_size,
+                    ),
+                );
+                let rl_repo = crate::adaptive_rate_limit::repository::AdaptiveRateLimitRepository::new(pool.clone());
+                let rl_engine = std::sync::Arc::new(
+                    crate::adaptive_rate_limit::engine::AdaptiveRateLimitEngine::new(
+                        rl_cfg,
+                        signals,
+                        std::sync::Arc::new(cache.clone()),
+                        rl_repo.clone(),
+                    ),
+                );
+                let emergency_queue = std::sync::Arc::new(
+                    crate::adaptive_rate_limit::queue::EmergencyQueue::new(
+                        rl_engine.config.emergency_queue_max_depth,
+                    ),
+                );
+                let rl_state = crate::adaptive_rate_limit::middleware::AdaptiveRateLimitState {
+                    engine: rl_engine.clone(),
+                    emergency_queue,
+                    cache: std::sync::Arc::new(cache.clone()),
+                };
+
+                // Start the adaptive rl worker
+                let rl_worker = crate::adaptive_rate_limit::worker::AdaptiveRateLimitWorker::new(
+                    rl_engine.clone(),
+                    rl_repo,
+                );
+                tokio::spawn(rl_worker.run(worker_shutdown_rx.clone()));
+                info!("✅ Adaptive rate limiting worker started");
+
+                app
+                    .layer(axum::middleware::from_fn_with_state(
+                        rl_state,
+                        crate::adaptive_rate_limit::middleware::adaptive_rate_limit_middleware,
+                    ))
+            } else {
+                app
+            }
+        } else {
+            info!("⏭️  Adaptive rate limiting disabled (ADAPTIVE_RL_ENABLED=false)");
+            app
         };
 
         app

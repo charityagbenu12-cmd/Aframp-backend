@@ -186,6 +186,11 @@ path = "src/main.rs"
 # Integration test — trace context propagation (Issue #104)
 # ---------------------------------------------------------------------------
 [[test]]
+name = "adaptive_rate_limit_integration"
+path = "tests/adaptive_rate_limit_integration.rs"
+required-features = ["integration"]
+
+[[test]]
 name = "tracing_integration"
 path = "tests/tracing_integration.rs"
 

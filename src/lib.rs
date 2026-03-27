@@ -114,6 +114,10 @@ pub mod masking;
 #[cfg(feature = "database")]
 pub mod gateway;
 
+// Adaptive rate limiting and throttling system
+#[cfg(feature = "cache")]
+pub mod adaptive_rate_limit;
+
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
 #[contracterror]
