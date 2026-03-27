@@ -513,3 +513,54 @@ groups:
             Payment provider {{ $labels.provider }} p95 response time has exceeded 10s.
             Current p95: {{ $value | humanizeDuration }}.
           runbook: "https://runbooks.aframp.io/payment-provider-latency"
+
+  # ===========================================================================
+  # Database Backup Alerts (Issue #119)
+  # ===========================================================================
+  - name: aframp.backup
+    interval: 60s
+    rules:
+      # No successful snapshot in the last 25 hours
+      - alert: DatabaseSnapshotMissing
+        expr: |
+          (time() - aframp_backup_last_successful_snapshot_timestamp_seconds) > 90000
+        for: 5m
+        labels:
+          severity: critical
+          team: oncall
+        annotations:
+          summary: "No successful database snapshot in the last 25 hours"
+          description: >
+            The last successful database snapshot was
+            {{ $value | humanizeDuration }} ago.
+            Expected at most every 25 hours.
+          runbook: "https://runbooks.aframp.io/database-backup-missing"
+
+      # WAL archiving lag exceeds 5 minutes
+      - alert: WalArchivingLagHigh
+        expr: aframp_backup_wal_archiving_lag_seconds > 300
+        for: 2m
+        labels:
+          severity: warning
+          team: engineering
+        annotations:
+          summary: "WAL archiving lag is {{ $value | humanizeDuration }}"
+          description: >
+            PostgreSQL WAL archiving lag has exceeded 5 minutes.
+            Current lag: {{ $value | humanizeDuration }}.
+            This increases the potential data loss window for point-in-time recovery.
+          runbook: "https://runbooks.aframp.io/wal-archiving-lag"
+
+      # Backup verification failed
+      - alert: BackupVerificationFailed
+        expr: aframp_backup_verification_status == 0
+        for: 0m
+        labels:
+          severity: critical
+          team: oncall
+        annotations:
+          summary: "Database backup verification failed"
+          description: >
+            The automated integrity check for the latest database snapshot failed.
+            The backup may be corrupt or incomplete.
+          runbook: "https://runbooks.aframp.io/backup-verification-failed"

@@ -54,6 +54,10 @@ pub mod config;
 #[cfg(feature = "database")]
 pub mod admin;
 
+// Analytics dashboard data endpoints (Issue #113)
+#[cfg(feature = "database")]
+pub mod analytics;
+
 // Data classification framework — authoritative sensitivity taxonomy and
 // policy enforcement for every data field on the platform.
 #[cfg(feature = "database")]

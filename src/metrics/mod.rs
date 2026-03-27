@@ -852,6 +852,7 @@ fn register_all(r: &Registry) {
     crate::pentest::metrics::register(r);
     crate::masking::metrics::register(r);
     crate::gateway::metrics::register(r);
+    backup::register(r);
     #[cfg(feature = "database")]
 }
 
@@ -861,4 +862,75 @@ fn register_all(r: &Registry) {
 
 pub fn key_prefix(key: &str) -> &str {
     key.find(':').map(|i| &key[..i]).unwrap_or(key)
+}
+
+// ---------------------------------------------------------------------------
+// Backup metrics (Issue #119)
+// ---------------------------------------------------------------------------
+
+pub mod backup {
+    use super::*;
+
+    static LAST_SNAPSHOT_TIMESTAMP: OnceLock<GaugeVec> = OnceLock::new();
+    static WAL_ARCHIVING_LAG: OnceLock<GaugeVec> = OnceLock::new();
+    static VERIFICATION_STATUS: OnceLock<GaugeVec> = OnceLock::new();
+
+    /// Record the Unix timestamp of the last successful snapshot.
+    pub fn set_last_snapshot_timestamp(ts: f64) {
+        if let Some(g) = LAST_SNAPSHOT_TIMESTAMP.get() {
+            g.with_label_values(&[]).set(ts);
+        }
+    }
+
+    /// Record the current WAL archiving lag in seconds.
+    pub fn set_wal_lag(seconds: f64) {
+        if let Some(g) = WAL_ARCHIVING_LAG.get() {
+            g.with_label_values(&[]).set(seconds);
+        }
+    }
+
+    /// Record the verification status of the latest snapshot (1 = verified, 0 = failed).
+    pub fn set_verification_status(ok: bool) {
+        if let Some(g) = VERIFICATION_STATUS.get() {
+            g.with_label_values(&[]).set(if ok { 1.0 } else { 0.0 });
+        }
+    }
+
+    pub(super) fn register(r: &Registry) {
+        LAST_SNAPSHOT_TIMESTAMP
+            .set(
+                register_gauge_vec_with_registry!(
+                    "aframp_backup_last_successful_snapshot_timestamp_seconds",
+                    "Unix timestamp of the last successful database snapshot",
+                    &[],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        WAL_ARCHIVING_LAG
+            .set(
+                register_gauge_vec_with_registry!(
+                    "aframp_backup_wal_archiving_lag_seconds",
+                    "Seconds since the last WAL segment was archived",
+                    &[],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        VERIFICATION_STATUS
+            .set(
+                register_gauge_vec_with_registry!(
+                    "aframp_backup_verification_status",
+                    "Latest backup verification result: 1 = verified, 0 = failed",
+                    &[],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+    }
 }
