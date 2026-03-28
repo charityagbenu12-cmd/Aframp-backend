@@ -377,6 +377,21 @@ async fn main() -> anyhow::Result<()> {
         info!("Offramp processor worker disabled (OFFRAMP_PROCESSOR_ENABLED=false)");
     }
 
+    // Start Mint Expiry Worker — auto-expires stale pending/partially_approved requests
+    let mut mint_expiry_handle = None;
+    if let Some(pool) = db_pool.clone() {
+        let expiry_config = workers::mint_expiry::MintExpiryWorkerConfig::from_env();
+        info!(
+            poll_interval_secs = expiry_config.poll_interval.as_secs(),
+            batch_size = expiry_config.batch_size,
+            "Starting mint expiry worker"
+        );
+        let expiry_worker = workers::mint_expiry::MintExpiryWorker::new(pool, expiry_config);
+        mint_expiry_handle = Some(tokio::spawn(expiry_worker.run(worker_shutdown_rx.clone())));
+    } else {
+        info!("Skipping mint expiry worker (no database)");
+    }
+
     // Initialize webhook processor and retry worker
     let webhook_routes = if let Some(pool) = db_pool.clone() {
         let webhook_repo = std::sync::Arc::new(
@@ -696,7 +711,37 @@ async fn main() -> anyhow::Result<()> {
         info!("⏭️  Skipping fees routes (no database)");
         Router::new()
     };
-    
+
+    // Setup mint approval workflow routes
+    let mint_routes = if let Some(pool) = db_pool.clone() {
+        use api::mint::handlers::{
+            approve_mint_request, get_mint_audit, get_mint_request, list_mint_requests,
+            reject_mint_request, submit_mint_request, MintState,
+        };
+        use database::mint_request_repository::MintRequestRepository;
+        use middleware::rbac::{extract_identity, require_any_mint_role};
+        use services::mint_approval::MintApprovalService;
+
+        let repo = std::sync::Arc::new(MintRequestRepository::new(pool));
+        let service = std::sync::Arc::new(MintApprovalService::new(repo));
+        let mint_state = std::sync::Arc::new(MintState { service });
+
+        Router::new()
+            .route("/api/mint/requests", post(submit_mint_request).get(list_mint_requests))
+            .route("/api/mint/requests/:id", get(get_mint_request))
+            .route("/api/mint/requests/:id/approve", post(approve_mint_request))
+            .route("/api/mint/requests/:id/reject", post(reject_mint_request))
+            .route("/api/mint/requests/:id/audit", get(get_mint_audit))
+            // All mint endpoints require a valid identity; approve/reject also
+            // enforce role membership via the service layer
+            .route_layer(axum::middleware::from_fn(require_any_mint_role()))
+            .route_layer(axum::middleware::from_fn(extract_identity))
+            .with_state(mint_state)
+    } else {
+        info!("⏭️  Skipping mint routes (no database)");
+        Router::new()
+    };
+
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
@@ -736,6 +781,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(wallet_routes)
         .merge(rates_routes)
         .merge(fees_routes)
+        .merge(mint_routes)
         .merge(webhook_routes)
         .with_state(AppState {
             db_pool,
@@ -823,6 +869,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = offramp_handle {
         if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
             error!(error = %e, "Timed out waiting for offramp worker shutdown");
+        }
+    }
+    if let Some(handle) = mint_expiry_handle {
+        if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            error!(error = %e, "Timed out waiting for mint expiry worker shutdown");
         }
     }
 
