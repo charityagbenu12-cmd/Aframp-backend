@@ -250,3 +250,8 @@ required-features = ["database"]
 name = "key_management_test"
 path = "tests/key_management_test.rs"
 required-features = ["database"]
+
+[[test]]
+name = "issuer_account_integration"
+path = "tests/issuer_account_integration.rs"
+required-features = ["database"]

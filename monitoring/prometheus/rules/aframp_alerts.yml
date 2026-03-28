@@ -513,3 +513,66 @@ groups:
             Payment provider {{ $labels.provider }} p95 response time has exceeded 10s.
             Current p95: {{ $value | humanizeDuration }}.
           runbook: "https://runbooks.aframp.io/payment-provider-latency"
+
+  # ===========================================================================
+  # Issuer Account Security Alerts
+  # ===========================================================================
+  - name: aframp.issuer
+    interval: 30s
+    rules:
+      # Issuer account flag disabled — immediate alert
+      - alert: IssuerAccountFlagDisabled
+        expr: aframp_issuer_flags_ok < 1
+        for: 0m
+        labels:
+          severity: critical
+          team: oncall
+        annotations:
+          summary: "CRITICAL: Issuer account flag disabled (account={{ $labels.account_id }})"
+          description: >
+            One or more required issuer account flags (AUTH_REQUIRED, AUTH_REVOCABLE,
+            AUTH_CLAWBACK_ENABLED) are not set on account {{ $labels.account_id }}.
+            This indicates unauthorized account modification. Halt all issuance immediately.
+          runbook: "https://runbooks.aframp.io/issuer-flag-disabled"
+
+      # Master key weight non-zero — immediate alert
+      - alert: IssuerMasterKeyWeightNonZero
+        expr: aframp_issuer_master_weight > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: oncall
+        annotations:
+          summary: "CRITICAL: Issuer master key weight is non-zero (account={{ $labels.account_id }})"
+          description: >
+            The issuer account {{ $labels.account_id }} master key weight is {{ $value }}.
+            It must be 0. This is a critical configuration regression that allows unilateral minting.
+          runbook: "https://runbooks.aframp.io/issuer-master-key-weight"
+
+      # Fee account balance below alert threshold
+      - alert: FeeAccountBalanceLow
+        expr: aframp_fee_account_xlm_balance < 50
+        for: 5m
+        labels:
+          severity: warning
+          team: operations
+        annotations:
+          summary: "Fee account balance low (account={{ $labels.account_id }}, balance={{ $value }} XLM)"
+          description: >
+            The Stellar fee account {{ $labels.account_id }} balance is {{ $value }} XLM,
+            below the 50 XLM alert threshold. Schedule replenishment to avoid transaction failures.
+          runbook: "https://runbooks.aframp.io/fee-account-replenishment"
+
+      # Fee account balance critically low
+      - alert: FeeAccountBalanceCritical
+        expr: aframp_fee_account_xlm_balance < 10
+        for: 0m
+        labels:
+          severity: critical
+          team: oncall
+        annotations:
+          summary: "CRITICAL: Fee account balance critically low (account={{ $labels.account_id }}, balance={{ $value }} XLM)"
+          description: >
+            The Stellar fee account {{ $labels.account_id }} balance is {{ $value }} XLM,
+            below the 10 XLM minimum. Transaction submissions will fail immediately.
+          runbook: "https://runbooks.aframp.io/fee-account-replenishment"
