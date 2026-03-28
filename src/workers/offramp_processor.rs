@@ -367,8 +367,15 @@ impl OfframpProcessorWorker {
     }
 
     #[instrument(skip(self), name = "offramp_processor_cycle")]
-    async fn run_cycle(&self) -> Result<(), OfframpError> {
+    pub async fn run_cycle(&self) -> Result<(), OfframpError> {
         debug!("Running offramp processor cycle");
+
+        let _timer = crate::metrics::worker::cycle_duration_seconds()
+            .with_label_values(&["offramp_processor"])
+            .start_timer();
+        crate::metrics::worker::cycles_total()
+            .with_label_values(&["offramp_processor"])
+            .inc();
 
         // Stage 1: Receipt Verification
         if let Err(e) = self.process_received_payments().await {
@@ -389,6 +396,12 @@ impl OfframpProcessorWorker {
         if let Err(e) = self.process_refunds().await {
             error!(error = %e, "failed to process refunds");
         }
+
+        // Update last-cycle timestamp for missed-cycle alert rule
+        #[cfg(feature = "cache")]
+        crate::metrics::alerting::worker_last_cycle_timestamp()
+            .with_label_values(&["offramp_processor"])
+            .set(chrono::Utc::now().timestamp() as f64);
 
         Ok(())
     }

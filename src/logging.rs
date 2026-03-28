@@ -150,44 +150,18 @@ pub fn mask_wallet_address(address: &str) -> String {
     format!("{}...{}", &address[..4], &address[address.len() - 4..])
 }
 
-/// Redact sensitive fields from JSON-like structures
-///
-/// Replaces values for keys like "private_key", "secret", "password", "token"
+/// Redact sensitive fields from JSON-like structures.
+/// Delegates to the masking engine for consistent behaviour.
 #[cfg(feature = "database")]
 pub fn redact_sensitive_data(text: &str) -> String {
-    let sensitive_keys = [
-        "private_key",
-        "privateKey",
-        "secret",
-        "password",
-        "token",
-        "api_key",
-        "apiKey",
-        "auth",
-        "authorization",
-        "card_number",
-        "cardNumber",
-        "cvv",
-        "pin",
-    ];
-
-    let mut result = text.to_string();
-    for key in &sensitive_keys {
-        // Match patterns like "key": "value" or "key":"value"
-        let patterns = [
-            format!(r#""{}":\s*"[^"]*""#, key),
-            format!(r#"'{}': '[^']*'"#, key),
-        ];
-
-        for pattern in &patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                result = re
-                    .replace_all(&result, format!(r#""{}": "[REDACTED]""#, key))
-                    .to_string();
-            }
-        }
+    // Try to parse as JSON and use the engine; fall back to pattern scanner.
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text) {
+        crate::masking::engine::mask_json_value(&mut v);
+        return v.to_string();
     }
-    result
+    // Unstructured string — use pattern scanner.
+    let (sanitised, _) = crate::masking::patterns::scan_and_redact(text);
+    sanitised
 }
 
 /// Log a transaction event with full AFRI context

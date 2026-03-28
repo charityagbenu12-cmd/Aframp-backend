@@ -475,15 +475,42 @@ impl FeeCalculationService {
 mod tests {
     use super::*;
 
+    fn test_service() -> FeeCalculationService {
+        let pool = PgPool::connect_lazy("postgresql://test").unwrap();
+        FeeCalculationService::new(pool)
+    }
+
+    fn test_fee_config(
+        provider_fee_percent: Option<&str>,
+        provider_fee_flat: Option<&str>,
+        provider_fee_cap: Option<&str>,
+        platform_fee_percent: Option<&str>,
+        min_amount: Option<&str>,
+        max_amount: Option<&str>,
+    ) -> FeeConfig {
+        FeeConfig {
+            id: Uuid::new_v4(),
+            transaction_type: "onramp".to_string(),
+            payment_provider: Some("flutterwave".to_string()),
+            payment_method: Some("card".to_string()),
+            min_amount: min_amount.map(|value| BigDecimal::from_str(value).unwrap()),
+            max_amount: max_amount.map(|value| BigDecimal::from_str(value).unwrap()),
+            provider_fee_percent: provider_fee_percent
+                .map(|value| BigDecimal::from_str(value).unwrap()),
+            provider_fee_flat: provider_fee_flat.map(|value| BigDecimal::from_str(value).unwrap()),
+            provider_fee_cap: provider_fee_cap.map(|value| BigDecimal::from_str(value).unwrap()),
+            platform_fee_percent: platform_fee_percent
+                .map(|value| BigDecimal::from_str(value).unwrap()),
+        }
+    }
+
     #[tokio::test]
     async fn test_amount_in_range() {
         let amount = BigDecimal::from_str("10000").unwrap();
         let min = Some(BigDecimal::from_str("1000").unwrap());
         let max = Some(BigDecimal::from_str("50000").unwrap());
 
-        // Create a mock service just for testing the method
-        let pool = PgPool::connect_lazy("postgresql://test").unwrap();
-        let service = FeeCalculationService::new(pool);
+        let service = test_service();
 
         assert!(service.amount_in_range(&amount, &min, &max));
     }
@@ -517,5 +544,163 @@ mod tests {
 
         let json = serde_json::to_string(&breakdown).unwrap();
         assert!(json.contains("flutterwave"));
+    }
+
+    #[tokio::test]
+    async fn test_amount_in_range_includes_minimum_and_maximum_boundaries() {
+        let service = test_service();
+        let min = Some(BigDecimal::from_str("1000").unwrap());
+        let max = Some(BigDecimal::from_str("50000").unwrap());
+
+        assert!(service.amount_in_range(&BigDecimal::from(1000), &min, &max));
+        assert!(service.amount_in_range(&BigDecimal::from(50000), &min, &max));
+        assert!(!service.amount_in_range(&BigDecimal::from(999), &min, &max));
+        assert!(!service.amount_in_range(&BigDecimal::from(50001), &min, &max));
+    }
+
+    #[tokio::test]
+    async fn test_calculate_provider_fee_applies_tiered_percent_flat_and_cap() {
+        let service = test_service();
+        let config = test_fee_config(
+            Some("1.4"),
+            Some("100"),
+            Some("2000"),
+            Some("0.5"),
+            Some("1000"),
+            Some("50000"),
+        );
+
+        let fee = service
+            .calculate_provider_fee(
+                &BigDecimal::from_str("1000000").unwrap(),
+                &config,
+                Some("flutterwave"),
+                Some("card"),
+            )
+            .unwrap();
+
+        assert_eq!(fee.name, "flutterwave");
+        assert_eq!(fee.method, "card");
+        assert_eq!(fee.percent, BigDecimal::from_str("1.4").unwrap());
+        assert_eq!(fee.flat, BigDecimal::from_str("100").unwrap());
+        assert_eq!(fee.cap, Some(BigDecimal::from_str("2000").unwrap()));
+        assert_eq!(fee.calculated, BigDecimal::from_str("2000").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_provider_fee_supports_provider_specific_inputs() {
+        let service = test_service();
+        let config = test_fee_config(
+            Some("1.5"),
+            Some("0"),
+            Some("2000"),
+            Some("0.5"),
+            Some("1000"),
+            Some("50000"),
+        );
+
+        let fee = service
+            .calculate_provider_fee(
+                &BigDecimal::from_str("10000").unwrap(),
+                &config,
+                Some("paystack"),
+                Some("bank_transfer"),
+            )
+            .unwrap();
+
+        assert_eq!(fee.name, "paystack");
+        assert_eq!(fee.method, "bank_transfer");
+        assert_eq!(fee.calculated, BigDecimal::from_str("150").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_platform_fee_handles_cngn_transaction_fee_percentage() {
+        let service = test_service();
+        let config = test_fee_config(None, None, None, Some("0.3"), None, None);
+
+        let fee = service.calculate_platform_fee(&BigDecimal::from_str("100000").unwrap(), &config);
+
+        assert_eq!(fee.percent, BigDecimal::from_str("0.3").unwrap());
+        assert_eq!(fee.calculated, BigDecimal::from_str("300").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_platform_fee_returns_zero_for_zero_fee_configuration() {
+        let service = test_service();
+        let config = test_fee_config(None, None, None, None, None, None);
+
+        let fee = service.calculate_platform_fee(&BigDecimal::from_str("100000").unwrap(), &config);
+
+        assert_eq!(fee.percent, BigDecimal::from(0));
+        assert_eq!(fee.calculated, BigDecimal::from(0));
+    }
+
+    #[tokio::test]
+    async fn test_calculate_provider_fee_returns_none_when_provider_fee_not_configured() {
+        let service = test_service();
+        let config = test_fee_config(None, None, None, Some("0.5"), None, None);
+
+        let fee = service.calculate_provider_fee(
+            &BigDecimal::from_str("10000").unwrap(),
+            &config,
+            Some("flutterwave"),
+            Some("card"),
+        );
+
+        assert!(fee.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_provider_fee_preserves_small_decimal_precision() {
+        let service = test_service();
+        let config = test_fee_config(Some("1.4"), Some("0"), None, Some("0"), None, None);
+
+        let fee = service
+            .calculate_provider_fee(
+                &BigDecimal::from_str("1000.125").unwrap(),
+                &config,
+                Some("flutterwave"),
+                Some("card"),
+            )
+            .unwrap();
+
+        assert_eq!(fee.calculated, BigDecimal::from_str("14.00175").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_provider_fee_handles_extremely_large_amounts() {
+        let service = test_service();
+        let config = test_fee_config(Some("1.4"), Some("0"), Some("2000"), Some("0"), None, None);
+
+        let fee = service
+            .calculate_provider_fee(
+                &BigDecimal::from_str("999999999999.99").unwrap(),
+                &config,
+                Some("flutterwave"),
+                Some("card"),
+            )
+            .unwrap();
+
+        assert_eq!(fee.calculated, BigDecimal::from_str("2000").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_calculate_stellar_fee_is_absorbed_and_deterministic() {
+        let service = test_service();
+        let stellar_fee = service.calculate_stellar_fee().await;
+
+        assert_eq!(stellar_fee.xlm, BigDecimal::from_str("0.00001").unwrap());
+        assert_eq!(stellar_fee.ngn, BigDecimal::from(0));
+        assert!(stellar_fee.absorbed);
+    }
+
+    #[tokio::test]
+    async fn test_get_xlm_rate_returns_cached_default_rate() {
+        let service = test_service();
+        let first = service.get_xlm_rate().await.unwrap();
+        let second = service.get_xlm_rate().await.unwrap();
+
+        assert_eq!(first, BigDecimal::from_str("150").unwrap());
+        assert_eq!(second, first);
     }
 }

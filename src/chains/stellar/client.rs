@@ -207,6 +207,48 @@ impl StellarClient {
         Ok(extract_asset_balance(&account.balances, asset_code, issuer))
     }
 
+    /// Get transaction details by hash
+    pub async fn get_transaction_details(&self, tx_hash: &str) -> StellarResult<HorizonTransactionRecord> {
+        debug!("Fetching transaction details for hash: {}", tx_hash);
+
+        let url = format!("{}/transactions/{}", self.config.horizon_url(), tx_hash);
+
+        let response = timeout(
+            self.config.request_timeout,
+            self.http_client.get(&url).send(),
+        )
+        .await
+        .map_err(|_| StellarError::timeout_error(self.config.request_timeout.as_secs()))?;
+
+        let response = response.map_err(|e| {
+            if e.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                StellarError::transaction_not_found(tx_hash)
+            } else if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+                StellarError::RateLimitError
+            } else {
+                StellarError::network_error(format!("Horizon API error: {}", e))
+            }
+        })?;
+
+        let response = response.error_for_status().map_err(|e: reqwest::Error| {
+            if e.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                StellarError::transaction_not_found(tx_hash)
+            } else if e.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+                StellarError::RateLimitError
+            } else {
+                StellarError::network_error(format!("Horizon API error: {}", e))
+            }
+        })?;
+
+        let transaction: HorizonTransactionRecord = response
+            .json()
+            .await
+            .map_err(|e| StellarError::network_error(format!("JSON parsing error: {}", e)))?;
+
+        debug!("Successfully fetched transaction details for hash: {}", tx_hash);
+        Ok(transaction)
+    }
+
     pub async fn health_check(&self) -> StellarResult<HealthStatus> {
         let start_time = Instant::now();
         let horizon_url = self.config.horizon_url();

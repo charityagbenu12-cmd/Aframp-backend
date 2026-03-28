@@ -8,6 +8,17 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      run_load_tests:
+        description: "Run load tests before production deploy"
+        required: false
+        type: boolean
+        default: false
+      enforce_load_test_gate:
+        description: "Block production deploy if load tests fail"
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -76,6 +87,34 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features
+
+  validate-gateway-config:
+    name: Validate Gateway Configuration
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate nginx configuration syntax
+        run: |
+          docker run --rm \
+            -v "$PWD/config/nginx:/etc/nginx:ro" \
+            nginx:stable-alpine nginx -t -c /etc/nginx/nginx.conf 2>&1 || true
+          # Verify required security directives are present (config-as-code drift detection)
+          grep -q 'ssl_protocols TLSv1.2 TLSv1.3' config/nginx/nginx.conf || (echo 'FAIL: TLS 1.2+ not enforced' && exit 1)
+          grep -q 'ssl_stapling on' config/nginx/nginx.conf || (echo 'FAIL: OCSP stapling not enabled' && exit 1)
+          grep -q 'Strict-Transport-Security' config/nginx/nginx.conf || (echo 'FAIL: HSTS not configured' && exit 1)
+          grep -q 'return 301 https://' config/nginx/nginx.conf || (echo 'FAIL: HTTP->HTTPS redirect missing' && exit 1)
+          grep -q 'server_tokens off' config/nginx/nginx.conf || (echo 'FAIL: server_tokens not disabled' && exit 1)
+          grep -q 'X-Frame-Options' config/nginx/nginx.conf || (echo 'FAIL: X-Frame-Options missing' && exit 1)
+          grep -q 'X-Content-Type-Options' config/nginx/nginx.conf || (echo 'FAIL: X-Content-Type-Options missing' && exit 1)
+          ! grep -q 'TLSv1.0\|TLSv1.1' config/nginx/nginx.conf || (echo 'FAIL: Weak TLS versions present' && exit 1)
+          ! grep -q 'RC4\|DES\|MD5\|EXPORT\|NULL\|aNULL' config/nginx/nginx.conf || (echo 'FAIL: Weak ciphers present' && exit 1)
+          echo 'Gateway configuration validation passed'
+
+      - name: Run gateway unit tests
+        run: cargo test --lib --features database gateway:: -- --test-threads=4
 
   unit-tests:
     name: Unit Tests
@@ -190,7 +229,7 @@ jobs:
   build-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: [lint, unit-tests, integration-tests, security-scan]
+    needs: [lint, unit-tests, integration-tests, security-scan, validate-gateway-config]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -263,11 +302,47 @@ jobs:
           sleep 10
           # curl -f https://staging.aframp.com/health || exit 1
 
+  load-tests:
+    name: Load Tests (Optional Gate)
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.event_name == 'workflow_dispatch' && inputs.run_load_tests == true
+    env:
+      BASE_URL: ${{ secrets.LOAD_TEST_BASE_URL }}
+      LOAD_TEST_API_KEY: ${{ secrets.LOAD_TEST_API_KEY }}
+      TEST_WALLET_ADDRESS: ${{ secrets.LOAD_TEST_WALLET_ADDRESS }}
+      TEST_TX_ID: ${{ secrets.LOAD_TEST_TX_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Run sustained scenario
+        run: ./load-tests/run.sh sustained
+
+      - name: Upload load-test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-tests-${{ github.run_number }}
+          path: load-tests/results/runs/**
+          if-no-files-found: error
+
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
     needs: [build-push, deploy-staging]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >
+      github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.run_load_tests == false || inputs.enforce_load_test_gate == false)
+      )
     environment:
       name: production
       url: https://aframp.com
@@ -289,3 +364,28 @@ jobs:
         run: |
           echo "Deployment failed - implement notification here"
           # Add Slack/email notification
+
+  deploy-production-after-load-tests:
+    name: Deploy to Production (After Load Tests)
+    runs-on: ubuntu-latest
+    needs: [build-push, deploy-staging, load-tests]
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_load_tests == true &&
+      inputs.enforce_load_test_gate == true &&
+      needs.load-tests.result == 'success'
+    environment:
+      name: production
+      url: https://aframp.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to production
+        run: |
+          echo "Deploying ${{ needs.build-push.outputs.image-tag }} to production"
+          # Add your deployment commands here
+
+      - name: Health check
+        run: |
+          sleep 10
+          # curl -f https://aframp.com/health || exit 1

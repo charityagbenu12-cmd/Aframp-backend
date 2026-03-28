@@ -8,6 +8,7 @@ use tokio::time::timeout;
 use tracing::{error, info};
 
 use crate::cache::RedisCache;
+use crate::cache::warmer::WarmingState;
 use crate::chains::stellar::client::StellarClient;
 
 /// Health status response
@@ -88,6 +89,8 @@ pub struct HealthChecker {
     db_pool: Option<sqlx::PgPool>,
     cache: Option<RedisCache>,
     stellar_client: Option<StellarClient>,
+    /// Readiness gate: unhealthy until cache warming completes.
+    pub warming_state: Option<WarmingState>,
 }
 
 impl HealthChecker {
@@ -100,7 +103,14 @@ impl HealthChecker {
             db_pool,
             cache,
             stellar_client,
+            warming_state: None,
         }
+    }
+
+    /// Attach a warming state so the readiness probe blocks until warming is done.
+    pub fn with_warming_state(mut self, state: WarmingState) -> Self {
+        self.warming_state = Some(state);
+        self
     }
 
     /// Perform comprehensive health check
@@ -235,6 +245,22 @@ impl HealthChecker {
         } else {
             HealthState::Unhealthy
         };
+
+        // Readiness gate: report Unhealthy until cache warming completes.
+        if let Some(ref ws) = self.warming_state {
+            if !ws.is_ready() {
+                health_status.checks.insert(
+                    "cache_warming".to_string(),
+                    ComponentHealth::down(Some("Cache warming not yet complete".to_string())),
+                );
+                health_status.status = HealthState::Unhealthy;
+            } else {
+                health_status.checks.insert(
+                    "cache_warming".to_string(),
+                    ComponentHealth::up(None),
+                );
+            }
+        }
 
         health_status
     }

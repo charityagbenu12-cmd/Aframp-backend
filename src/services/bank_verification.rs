@@ -122,6 +122,15 @@ impl BankVerificationService {
                 self.verify_with_paystack(bank_code, account_number, provided_name)
                     .await
             }
+            ProviderName::Mock => {
+                Ok(BankVerificationResult {
+                    account_number: account_number.to_string(),
+                    account_name: provided_name.to_string(),
+                    bank_name: Some("Mock Bank".to_string()),
+                    verified: true,
+                    verified_at: chrono::Utc::now().to_rfc3339(),
+                })
+            }
             _ => {
                 error!(provider = ?provider_name, "Unsupported provider for bank verification");
                 Err(AppError::new(AppErrorKind::Validation(

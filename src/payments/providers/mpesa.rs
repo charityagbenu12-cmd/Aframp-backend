@@ -38,6 +38,11 @@ pub struct MpesaProvider {
 }
 
 impl MpesaProvider {
+    #[allow(dead_code)]
+    pub fn new(config: MpesaConfig) -> PaymentResult<Self> {
+        Ok(Self { _config: config })
+    }
+
     pub fn from_env() -> PaymentResult<Self> {
         Ok(Self {
             _config: MpesaConfig::from_env()?,

@@ -27,6 +27,9 @@ pub mod middleware;
 #[cfg(feature = "database")]
 pub mod logging;
 
+#[cfg(feature = "database")]
+pub mod telemetry;
+
 // Cache layer
 #[cfg(feature = "cache")]
 pub mod cache;
@@ -39,13 +42,34 @@ pub mod services;
 #[cfg(feature = "database")]
 pub mod payments;
 
+// KYC (Know Your Customer) verification system
+#[cfg(feature = "database")]
+pub mod kyc;
+
 // Configuration module
 #[cfg(feature = "database")]
 pub mod config;
 
+// Admin access control system
+#[cfg(feature = "database")]
+pub mod admin;
+
+// Data classification framework — authoritative sensitivity taxonomy and
+// policy enforcement for every data field on the platform.
+#[cfg(feature = "database")]
+pub mod data_classification;
+
 // API handlers (exposed for integration tests)
 #[cfg(feature = "database")]
 pub mod api;
+
+// Auth module – JWT generation, validation, middleware
+#[cfg(feature = "database")]
+pub mod auth;
+
+// OAuth 2.0 authorization server
+#[cfg(feature = "database")]
+pub mod oauth;
 
 // Health check module
 #[cfg(feature = "database")]
@@ -54,6 +78,41 @@ pub mod health;
 // Background workers
 #[cfg(feature = "database")]
 pub mod workers;
+
+// Recurring payment frequency helpers
+#[cfg(feature = "database")]
+pub mod recurring;
+
+// API key generation and issuance (Issue #131)
+#[cfg(feature = "database")]
+pub mod api_keys;
+
+// Prometheus metrics
+#[cfg(feature = "database")]
+pub mod metrics;
+
+// DDoS protection and traffic shaping
+#[cfg(feature = "cache")]
+pub mod ddos;
+
+// End-to-end payload encryption (Issue — Data Security & Encryption)
+#[cfg(feature = "database")]
+pub mod crypto;
+
+// Platform key management framework (Issue — Key Management & Rotation)
+#[cfg(feature = "database")]
+pub mod key_management;
+// Penetration testing & security review framework
+#[cfg(feature = "database")]
+pub mod pentest;
+
+// Data masking & redaction system
+#[cfg(feature = "database")]
+pub mod masking;
+
+// API gateway security policy enforcement
+#[cfg(feature = "database")]
+pub mod gateway;
 
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]

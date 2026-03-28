@@ -11,6 +11,9 @@ pub struct AppConfig {
     pub cache: CacheConfig,
     pub logging: LoggingConfig,
     pub stellar: StellarConfig,
+    /// Distributed tracing configuration (Issue #104 — OpenTelemetry).
+    pub telemetry: TelemetryConfig,
+    pub kyc: KycConfig,
 }
 
 /// Server configuration
@@ -64,6 +67,113 @@ pub struct StellarConfig {
     pub health_check_interval: u64, // seconds
 }
 
+// ---------------------------------------------------------------------------
+// Telemetry configuration  (Issue #104 — Distributed Tracing)
+// ---------------------------------------------------------------------------
+
+/// OpenTelemetry / distributed-tracing configuration.
+///
+/// All fields are loaded from environment variables so the tracing backend,
+/// service name, environment tag, and sampling rate can be changed without
+/// recompiling the binary.
+///
+/// Environment variables
+/// ─────────────────────
+/// | Variable                        | Default                   | Description                                          |
+/// |---------------------------------|---------------------------|------------------------------------------------------|
+/// | `OTEL_SERVICE_NAME`             | `"aframp-backend"`        | Service name emitted in every span.                  |
+/// | `APP_ENV`                       | `"development"`           | Deployment environment tag on every span.            |
+/// | `OTEL_SAMPLING_RATE`            | `1.0`                     | Fraction of root spans sampled (0.0 – 1.0).          |
+/// | `OTEL_EXPORTER_OTLP_ENDPOINT`   | `"http://localhost:4317"` | gRPC endpoint of the OTLP collector (Jaeger / Tempo).|
+#[derive(Debug, Clone)]
+pub struct TelemetryConfig {
+    /// Human-readable service name attached to every exported span as
+    /// the `service.name` resource attribute.
+    pub service_name: String,
+
+    /// Deployment environment (e.g. `"development"`, `"staging"`, `"production"`).
+    /// Attached to every span as the `deployment.environment` resource attribute.
+    pub environment: String,
+
+    /// Fraction of root spans to sample (0.0 = none, 1.0 = all).
+    ///
+    /// Child spans always inherit the sampling decision of their parent, so a
+    /// trace is never split mid-flight.  Error traces are always exported
+    /// regardless of this value — the SDK uses `ParentBased(AlwaysOn)` when
+    /// the rate is 1.0 and `ParentBased(TraceIdRatioBased(rate))` otherwise.
+    ///
+    /// For production, start at `0.1` (10 %) and tune based on volume.
+    pub sampling_rate: f64,
+
+    /// OTLP gRPC collector endpoint.
+    ///
+    /// Typical values:
+    /// * Jaeger all-in-one:          `http://localhost:4317`
+    /// * Grafana Agent / Tempo:      `http://localhost:4317`
+    /// * OpenTelemetry Collector:    `http://otel-collector:4317`
+    pub otlp_endpoint: String,
+}
+
+impl TelemetryConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(TelemetryConfig {
+            service_name: env::var("OTEL_SERVICE_NAME")
+                .unwrap_or_else(|_| "aframp-backend".to_string()),
+
+            environment: env::var("APP_ENV")
+                .unwrap_or_else(|_| "development".to_string()),
+
+            sampling_rate: env::var("OTEL_SAMPLING_RATE")
+                .unwrap_or_else(|_| "1.0".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("OTEL_SAMPLING_RATE".to_string()))?,
+
+            otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // Sampling rate must be in [0.0, 1.0].
+        if !(0.0..=1.0).contains(&self.sampling_rate) {
+            return Err(ConfigError::InvalidValue(
+                "OTEL_SAMPLING_RATE must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+
+        // Service name must not be blank.
+        if self.service_name.trim().is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "OTEL_SERVICE_NAME cannot be empty".to_string(),
+            ));
+        }
+
+        // OTLP endpoint must look like an HTTP/HTTPS URL.
+        if !self.otlp_endpoint.starts_with("http://")
+            && !self.otlp_endpoint.starts_with("https://")
+        {
+            return Err(ConfigError::InvalidValue(
+                "OTEL_EXPORTER_OTLP_ENDPOINT must start with http:// or https://".to_string(),
+            ));
+        }
+
+        // APP_ENV must be one of the known deployment tiers.
+        let valid_envs = ["development", "staging", "production", "test"];
+        if !valid_envs.contains(&self.environment.as_str()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "APP_ENV must be one of: {}",
+                valid_envs.join(", ")
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AppConfig
+// ---------------------------------------------------------------------------
+
 impl AppConfig {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -76,6 +186,8 @@ impl AppConfig {
             cache: CacheConfig::from_env()?,
             logging: LoggingConfig::from_env()?,
             stellar: StellarConfig::from_env()?,
+            telemetry: TelemetryConfig::from_env()?,
+            kyc: KycConfig::from_env()?,
         })
     }
 
@@ -85,10 +197,16 @@ impl AppConfig {
         self.database.validate()?;
         self.cache.validate()?;
         self.stellar.validate()?;
+        self.telemetry.validate()?;
+        self.kyc.validate()?;
 
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Existing config impls (unchanged)
+// ---------------------------------------------------------------------------
 
 impl ServerConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -281,6 +399,10 @@ impl StellarConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Error types (unchanged)
+// ---------------------------------------------------------------------------
+
 /// Configuration error types
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -306,9 +428,212 @@ impl From<std::num::ParseFloatError> for ConfigError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// KYC Configuration
+// ---------------------------------------------------------------------------
+
+/// KYC (Know Your Customer) verification configuration
+#[derive(Debug, Clone)]
+pub struct KycConfig {
+    pub default_provider: String,
+    pub providers: Vec<KycProviderConfig>,
+    pub session_timeout_hours: u64,
+    pub webhook_timeout_seconds: u64,
+    pub max_document_size_mb: usize,
+    pub compliance: KycComplianceConfig,
+    pub limits: KycLimitsConfig,
+}
+
+/// Individual KYC provider configuration
+#[derive(Debug, Clone)]
+pub struct KycProviderConfig {
+    pub name: String,
+    pub api_key: String,
+    pub api_secret: String,
+    pub webhook_secret: String,
+    pub base_url: String,
+    pub timeout_seconds: u64,
+    pub retry_attempts: u32,
+    pub enabled: bool,
+}
+
+/// KYC compliance and EDD configuration
+#[derive(Debug, Clone)]
+pub struct KycComplianceConfig {
+    pub manual_review_queue_threshold: i64,
+    pub webhook_failure_rate_threshold: f64,
+    pub auto_approve_enabled: bool,
+    pub enhanced_due_diligence_enabled: bool,
+    pub audit_retention_days: u64,
+    pub compliance_report_schedule_hours: u64,
+}
+
+/// KYC transaction limits configuration
+#[derive(Debug, Clone)]
+pub struct KycLimitsConfig {
+    pub daily_reset_hour: u8, // 0-23
+    pub monthly_reset_day: u8, // 1-28
+    pub volume_check_enabled: bool,
+    pub violation_alert_threshold: f64, // 0.0-1.0
+}
+
+impl KycConfig {
+    /// Load KYC configuration from environment variables
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let default_provider = env::var("KYC_DEFAULT_PROVIDER")
+            .unwrap_or_else(|_| "smile_identity".to_string());
+
+        let session_timeout_hours = env::var("KYC_SESSION_TIMEOUT_HOURS")
+            .unwrap_or_else(|_| "24".to_string())
+            .parse()
+            .map_err(|_| ConfigError::InvalidValue("KYC_SESSION_TIMEOUT_HOURS".to_string()))?;
+
+        let webhook_timeout_seconds = env::var("KYC_WEBHOOK_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .map_err(|_| ConfigError::InvalidValue("KYC_WEBHOOK_TIMEOUT_SECONDS".to_string()))?;
+
+        let max_document_size_mb = env::var("KYC_MAX_DOCUMENT_SIZE_MB")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .map_err(|_| ConfigError::InvalidValue("KYC_MAX_DOCUMENT_SIZE_MB".to_string()))?;
+
+        // Load provider configurations
+        let providers = Self::load_providers()?;
+
+        let compliance = KycComplianceConfig {
+            manual_review_queue_threshold: env::var("KYC_MANUAL_REVIEW_QUEUE_THRESHOLD")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_MANUAL_REVIEW_QUEUE_THRESHOLD".to_string()))?,
+            webhook_failure_rate_threshold: env::var("KYC_WEBHOOK_FAILURE_RATE_THRESHOLD")
+                .unwrap_or_else(|_| "0.1".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_WEBHOOK_FAILURE_RATE_THRESHOLD".to_string()))?,
+            auto_approve_enabled: env::var("KYC_AUTO_APPROVE_ENABLED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_AUTO_APPROVE_ENABLED".to_string()))?,
+            enhanced_due_diligence_enabled: env::var("KYC_EDD_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_EDD_ENABLED".to_string()))?,
+            audit_retention_days: env::var("KYC_AUDIT_RETENTION_DAYS")
+                .unwrap_or_else(|_| "2555".to_string()) // 7 years
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_AUDIT_RETENTION_DAYS".to_string()))?,
+            compliance_report_schedule_hours: env::var("KYC_COMPLIANCE_REPORT_SCHEDULE_HOURS")
+                .unwrap_or_else(|_| "24".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_COMPLIANCE_REPORT_SCHEDULE_HOURS".to_string()))?,
+        };
+
+        let limits = KycLimitsConfig {
+            daily_reset_hour: env::var("KYC_DAILY_RESET_HOUR")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_DAILY_RESET_HOUR".to_string()))?,
+            monthly_reset_day: env::var("KYC_MONTHLY_RESET_DAY")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_MONTHLY_RESET_DAY".to_string()))?,
+            volume_check_enabled: env::var("KYC_VOLUME_CHECK_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_VOLUME_CHECK_ENABLED".to_string()))?,
+            violation_alert_threshold: env::var("KYC_VIOLATION_ALERT_THRESHOLD")
+                .unwrap_or_else(|_| "0.8".to_string())
+                .parse()
+                .map_err(|_| ConfigError::InvalidValue("KYC_VIOLATION_ALERT_THRESHOLD".to_string()))?,
+        };
+
+        Ok(KycConfig {
+            default_provider,
+            providers,
+            session_timeout_hours,
+            webhook_timeout_seconds,
+            max_document_size_mb,
+            compliance,
+            limits,
+        })
+    }
+
+    fn load_providers() -> Result<Vec<KycProviderConfig>, ConfigError> {
+        let mut providers = Vec::new();
+
+        // Load Smile Identity configuration if available
+        if let (Ok(api_key), Ok(api_secret)) = (
+            env::var("SMILE_IDENTITY_API_KEY"),
+            env::var("SMILE_IDENTITY_API_SECRET"),
+        ) {
+            providers.push(KycProviderConfig {
+                name: "smile_identity".to_string(),
+                api_key,
+                api_secret,
+                webhook_secret: env::var("SMILE_IDENTITY_WEBHOOK_SECRET").unwrap_or_default(),
+                base_url: env::var("SMILE_IDENTITY_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.smileidentity.com".to_string()),
+                timeout_seconds: env::var("SMILE_IDENTITY_TIMEOUT_SECONDS")
+                    .unwrap_or_else(|_| "30".to_string())
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidValue("SMILE_IDENTITY_TIMEOUT_SECONDS".to_string()))?,
+                retry_attempts: env::var("SMILE_IDENTITY_RETRY_ATTEMPTS")
+                    .unwrap_or_else(|_| "3".to_string())
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidValue("SMILE_IDENTITY_RETRY_ATTEMPTS".to_string()))?,
+                enabled: env::var("SMILE_IDENTITY_ENABLED")
+                    .unwrap_or_else(|_| "true".to_string())
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidValue("SMILE_IDENTITY_ENABLED".to_string()))?,
+            });
+        }
+
+        Ok(providers)
+    }
+
+    /// Validate KYC configuration
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.providers.is_empty() {
+            return Err(ConfigError::Validation("No KYC providers configured".to_string()));
+        }
+
+        // Check if default provider exists and is enabled
+        if !self.providers.iter().any(|p| p.name == self.default_provider && p.enabled) {
+            return Err(ConfigError::Validation(format!(
+                "Default provider '{}' not found or not enabled",
+                self.default_provider
+            )));
+        }
+
+        if self.session_timeout_hours == 0 {
+            return Err(ConfigError::Validation("Session timeout must be greater than 0".to_string()));
+        }
+
+        if self.max_document_size_mb == 0 {
+            return Err(ConfigError::Validation("Max document size must be greater than 0".to_string()));
+        }
+
+        if self.limits.daily_reset_hour > 23 {
+            return Err(ConfigError::Validation("Daily reset hour must be 0-23".to_string()));
+        }
+
+        if self.limits.monthly_reset_day == 0 || self.limits.monthly_reset_day > 28 {
+            return Err(ConfigError::Validation("Monthly reset day must be 1-28".to_string()));
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── existing tests (unchanged) ──────────────────────────────────────────
 
     #[test]
     fn test_server_config_validation() {
@@ -341,5 +666,153 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    // ── TelemetryConfig tests (Issue #104) ──────────────────────────────────
+
+    fn valid_telemetry_config() -> TelemetryConfig {
+        TelemetryConfig {
+            service_name: "aframp-backend".to_string(),
+            environment: "development".to_string(),
+            sampling_rate: 1.0,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_telemetry_config_valid_defaults() {
+        assert!(valid_telemetry_config().validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_sampling_rate_boundaries() {
+        // 0.0 (sample nothing) is valid.
+        let cfg = TelemetryConfig { sampling_rate: 0.0, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_ok());
+
+        // 1.0 (sample everything) is valid.
+        let cfg = TelemetryConfig { sampling_rate: 1.0, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_ok());
+
+        // 0.25 (25 %) is valid.
+        let cfg = TelemetryConfig { sampling_rate: 0.25, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_sampling_rate_out_of_range() {
+        // Above 1.0 must fail.
+        let cfg = TelemetryConfig { sampling_rate: 1.1, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_err());
+
+        // Negative must fail.
+        let cfg = TelemetryConfig { sampling_rate: -0.1, ..valid_telemetry_config() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_empty_service_name() {
+        let cfg = TelemetryConfig {
+            service_name: "  ".to_string(), // whitespace only
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_invalid_otlp_endpoint() {
+        // No scheme at all.
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "localhost:4317".to_string(),
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+
+        // Wrong scheme.
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "grpc://localhost:4317".to_string(),
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_https_otlp_endpoint_is_valid() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "https://otel-collector.example.com:4317".to_string(),
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_invalid_environment() {
+        let cfg = TelemetryConfig {
+            environment: "local".to_string(), // not in the allowed list
+            ..valid_telemetry_config()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_telemetry_all_valid_environments() {
+        for env_name in &["development", "staging", "production", "test"] {
+            let cfg = TelemetryConfig {
+                environment: env_name.to_string(),
+                ..valid_telemetry_config()
+            };
+            assert!(
+                cfg.validate().is_ok(),
+                "environment '{}' should be valid",
+                env_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_telemetry_env_var_defaults() {
+        // Remove all four OTel env vars so defaults are exercised.
+        std::env::remove_var("OTEL_SERVICE_NAME");
+        std::env::remove_var("APP_ENV");
+        std::env::remove_var("OTEL_SAMPLING_RATE");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+
+        let cfg = TelemetryConfig::from_env().expect("should load from defaults");
+
+        assert_eq!(cfg.service_name, "aframp-backend");
+        assert_eq!(cfg.environment, "development");
+        assert!((cfg.sampling_rate - 1.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.otlp_endpoint, "http://localhost:4317");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_telemetry_env_var_overrides() {
+        std::env::set_var("OTEL_SERVICE_NAME", "payment-worker");
+        std::env::set_var("APP_ENV", "production");
+        std::env::set_var("OTEL_SAMPLING_RATE", "0.1");
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317");
+
+        let cfg = TelemetryConfig::from_env().expect("should load from env vars");
+
+        assert_eq!(cfg.service_name, "payment-worker");
+        assert_eq!(cfg.environment, "production");
+        assert!((cfg.sampling_rate - 0.1).abs() < f64::EPSILON);
+        assert_eq!(cfg.otlp_endpoint, "http://otel-collector:4317");
+        assert!(cfg.validate().is_ok());
+
+        // Clean up so other tests are not affected.
+        std::env::remove_var("OTEL_SERVICE_NAME");
+        std::env::remove_var("APP_ENV");
+        std::env::remove_var("OTEL_SAMPLING_RATE");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+    }
+
+    #[test]
+    fn test_telemetry_invalid_sampling_rate_env_var() {
+        std::env::set_var("OTEL_SAMPLING_RATE", "not-a-number");
+        let result = TelemetryConfig::from_env();
+        assert!(result.is_err());
+        std::env::remove_var("OTEL_SAMPLING_RATE");
     }
 }

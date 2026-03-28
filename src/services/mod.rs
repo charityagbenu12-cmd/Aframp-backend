@@ -16,15 +16,27 @@ pub mod fee_calculation;
 #[cfg(feature = "database")]
 pub mod fee_structure;
 #[cfg(feature = "database")]
+pub mod geolocation;
+#[cfg(feature = "database")]
+pub mod geo_restriction;
+#[cfg(feature = "database")]
+pub mod geo_restriction_tests;
+#[cfg(feature = "database")]
+pub mod ip_detection;
+#[cfg(feature = "database")]
+pub mod key_rotation;
+pub mod notification;
+#[cfg(feature = "database")]
 pub mod onramp_quote;
 #[cfg(feature = "database")]
 pub mod payment_orchestrator;
 #[cfg(feature = "database")]
 pub mod rate_providers;
 #[cfg(feature = "database")]
+pub mod transaction;
+#[cfg(feature = "database")]
 pub mod trustline_operation;
 pub mod webhook_processor;
-pub mod notification;
 
 // Re-export blockchain traits for convenience
 #[cfg(feature = "database")]

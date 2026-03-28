@@ -120,7 +120,24 @@ impl BlockchainService for StellarBlockchainService {
     }
 
     async fn submit_transaction(&self, signed_tx: &str) -> BlockchainResult<TransactionResult> {
-        let response = self.client.submit_transaction_xdr(signed_tx).await?;
+        let _timer = crate::metrics::stellar::tx_submission_duration_seconds()
+            .with_label_values(&[])
+            .start_timer();
+        let response = self.client.submit_transaction_xdr(signed_tx).await;
+        let response = match response {
+            Ok(r) => {
+                crate::metrics::stellar::tx_submissions_total()
+                    .with_label_values(&["success"])
+                    .inc();
+                r
+            }
+            Err(e) => {
+                crate::metrics::stellar::tx_submissions_total()
+                    .with_label_values(&["failed"])
+                    .inc();
+                return Err(e.into());
+            }
+        };
 
         let hash = response
             .get("hash")

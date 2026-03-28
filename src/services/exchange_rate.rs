@@ -211,17 +211,16 @@ impl ExchangeRateService {
             .await?;
 
         // Calculate gross amount
-        let gross_amount = &request.amount * &rate;
+        let gross_amount = compute_gross_amount(&request.amount, &rate);
 
         // Calculate fees
         let fees = self.calculate_fees(&request, &gross_amount).await?;
 
         // Calculate net amount (gross - fees)
-        let net_amount = &gross_amount - &fees.total_fees;
+        let net_amount = compute_net_amount(&gross_amount, &fees.total_fees);
 
         // Calculate expiry time
-        let expires_at =
-            Utc::now() + chrono::Duration::seconds(self.config.rate_expiry_seconds as i64);
+        let expires_at = build_quote_expiry(Utc::now(), self.config.rate_expiry_seconds);
 
         Ok(ConversionResult {
             from_currency: request.from_currency.clone(),
@@ -282,6 +281,16 @@ impl ExchangeRateService {
         if let Some(ref cache) = self.cache {
             let cache_key = CurrencyPairKey::new(from_currency, to_currency);
             let _ = <RedisCache as Cache<RateData>>::delete(cache, &cache_key.to_string()).await;
+        }
+
+        // Update exchange rate staleness metric for alert rules
+        #[cfg(feature = "cache")]
+        {
+            let currency_pair = format!("{}/{}", from_currency, to_currency);
+            let now = chrono::Utc::now().timestamp() as f64;
+            crate::metrics::alerting::exchange_rate_last_updated()
+                .with_label_values(&[&currency_pair])
+                .set(now);
         }
 
         debug!(
@@ -471,9 +480,34 @@ struct FeeCalculation {
     total_fees: BigDecimal,
 }
 
+fn compute_gross_amount(amount: &BigDecimal, rate: &BigDecimal) -> BigDecimal {
+    amount * rate
+}
+
+fn compute_net_amount(gross_amount: &BigDecimal, total_fees: &BigDecimal) -> BigDecimal {
+    gross_amount - total_fees
+}
+
+fn compute_required_gross_amount(
+    target_net_amount: &BigDecimal,
+    total_fees: &BigDecimal,
+) -> BigDecimal {
+    target_net_amount + total_fees
+}
+
+fn build_quote_expiry(now: DateTime<Utc>, rate_expiry_seconds: u64) -> DateTime<Utc> {
+    now + chrono::Duration::seconds(rate_expiry_seconds as i64)
+}
+
+fn is_quote_expired(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now >= expires_at
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::rate_providers::FixedRateProvider;
+    use chrono::TimeZone;
 
     #[test]
     fn test_conversion_direction() {
@@ -500,5 +534,105 @@ mod tests {
         // Negative rate
         let result = service.validate_rate("USD", "NGN", &BigDecimal::from(-1));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compute_gross_amount_for_standard_fiat_to_cngn_conversion() {
+        let gross_amount = compute_gross_amount(
+            &BigDecimal::from_str("50000").unwrap(),
+            &BigDecimal::from_str("1").unwrap(),
+        );
+
+        assert_eq!(gross_amount, BigDecimal::from_str("50000").unwrap());
+    }
+
+    #[test]
+    fn test_compute_gross_amount_for_cngn_to_fiat_conversion() {
+        let gross_amount = compute_gross_amount(
+            &BigDecimal::from_str("1250.50").unwrap(),
+            &BigDecimal::from_str("1").unwrap(),
+        );
+
+        assert_eq!(gross_amount, BigDecimal::from_str("1250.50").unwrap());
+    }
+
+    #[test]
+    fn test_fractional_conversion_preserves_bigdecimal_precision() {
+        let gross_amount = compute_gross_amount(
+            &BigDecimal::from_str("1000.125").unwrap(),
+            &BigDecimal::from_str("1.0001").unwrap(),
+        );
+
+        assert_eq!(gross_amount, BigDecimal::from_str("1000.2250125").unwrap());
+    }
+
+    #[test]
+    fn test_compute_net_amount_after_fees() {
+        let net_amount = compute_net_amount(
+            &BigDecimal::from_str("50000").unwrap(),
+            &BigDecimal::from_str("750").unwrap(),
+        );
+
+        assert_eq!(net_amount, BigDecimal::from_str("49250").unwrap());
+    }
+
+    #[test]
+    fn test_compute_required_gross_amount_for_target_net_cngn() {
+        let gross_amount = compute_required_gross_amount(
+            &BigDecimal::from_str("49250").unwrap(),
+            &BigDecimal::from_str("750").unwrap(),
+        );
+
+        assert_eq!(gross_amount, BigDecimal::from_str("50000").unwrap());
+    }
+
+    #[test]
+    fn test_build_quote_expiry_from_fixed_time() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 25, 10, 0, 0).unwrap();
+        let expires_at = build_quote_expiry(now, 180);
+
+        assert_eq!(
+            expires_at,
+            Utc.with_ymd_and_hms(2026, 3, 25, 10, 3, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_quote_expiry_validation() {
+        let expires_at = Utc.with_ymd_and_hms(2026, 3, 25, 10, 3, 0).unwrap();
+
+        assert!(!is_quote_expired(
+            expires_at,
+            Utc.with_ymd_and_hms(2026, 3, 25, 10, 2, 59).unwrap()
+        ));
+        assert!(is_quote_expired(
+            expires_at,
+            Utc.with_ymd_and_hms(2026, 3, 25, 10, 3, 0).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_extremely_large_transaction_amount_conversion() {
+        let gross_amount = compute_gross_amount(
+            &BigDecimal::from_str("999999999999.99").unwrap(),
+            &BigDecimal::from_str("1").unwrap(),
+        );
+
+        assert_eq!(
+            gross_amount,
+            BigDecimal::from_str("999999999999.99").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fixed_rate_provider_rejects_unsupported_currency_pair() {
+        let provider = FixedRateProvider::new();
+        let result = provider.fetch_rate("USD", "cNGN").await;
+
+        assert!(matches!(
+            result,
+            Err(ExchangeRateError::RateNotFound { ref from, ref to })
+            if from == "USD" && to == "cNGN"
+        ));
     }
 }

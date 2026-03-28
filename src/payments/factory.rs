@@ -1,6 +1,6 @@
 use crate::payments::error::{PaymentError, PaymentResult};
 use crate::payments::provider::PaymentProvider;
-use crate::payments::providers::{FlutterwaveProvider, MpesaProvider, PaystackProvider};
+use crate::payments::providers::{FlutterwaveProvider, MpesaProvider, PaystackProvider, MockProvider};
 use crate::payments::types::ProviderName;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -93,6 +93,7 @@ impl PaymentProviderFactory {
             ProviderName::Paystack => Ok(Box::new(PaystackProvider::from_env()?)),
             ProviderName::Flutterwave => Ok(Box::new(FlutterwaveProvider::from_env()?)),
             ProviderName::Mpesa => Ok(Box::new(MpesaProvider::from_env()?)),
+            ProviderName::Mock => Ok(Box::new(MockProvider::new())),
         }
     }
 
