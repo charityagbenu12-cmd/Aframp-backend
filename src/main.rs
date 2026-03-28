@@ -21,6 +21,7 @@ mod oauth;
 mod payments;
 mod pentest;
 mod recurring;
+mod security_compliance;
 mod services;
 mod telemetry;
 mod workers;
@@ -1332,6 +1333,57 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
     };
 
+    // ── Security compliance admin routes ──────────────────────────────────────
+    let security_compliance_routes = if let Some(ref pool) = db_pool {
+        let sec_cfg = crate::security_compliance::config::SecurityComplianceConfig::from_env();
+        let sec_repo = crate::security_compliance::repository::SecurityComplianceRepository::new(pool.clone());
+        let sec_state = crate::security_compliance::handlers::SecurityComplianceState {
+            repo: std::sync::Arc::new(sec_repo),
+            config: std::sync::Arc::new(sec_cfg),
+        };
+        Router::new()
+            .route(
+                "/api/admin/security/vulnerabilities",
+                get(crate::security_compliance::handlers::list_vulnerabilities),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id",
+                get(crate::security_compliance::handlers::get_vulnerability),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id/acknowledge",
+                post(crate::security_compliance::handlers::acknowledge_vulnerability),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id/resolve",
+                post(crate::security_compliance::handlers::resolve_vulnerability),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id/accept-risk",
+                post(crate::security_compliance::handlers::accept_risk),
+            )
+            .route(
+                "/api/admin/security/compliance/posture",
+                get(crate::security_compliance::handlers::get_posture),
+            )
+            .route(
+                "/api/admin/security/findings/ingest",
+                post(crate::security_compliance::handlers::ingest_finding),
+            )
+            .route(
+                "/api/admin/security/allowlist",
+                get(crate::security_compliance::handlers::list_allowlist)
+                    .post(crate::security_compliance::handlers::add_allowlist_entry),
+            )
+            .route(
+                "/api/admin/security/reports",
+                get(crate::security_compliance::handlers::list_reports),
+            )
+            .with_state(sec_state)
+    } else {
+        Router::new()
+    };
+
     // ── mTLS certificate lifecycle — Issue #204 ───────────────────────────────
     // Provision the intermediate CA and start the lifecycle worker.
     // The admin routes are always available (they operate on the in-memory store).
@@ -1681,6 +1733,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(pentest_routes)
         .merge(developer_portal::routes::register_developer_portal_routes(Router::new(), db_pool.clone()))
         .merge(Router::new().nest("/api/admin/security", mtls_admin_routes))
+        .merge(security_compliance_routes)
         .with_state(AppState {
             db_pool,
             redis_cache,
@@ -1817,6 +1870,22 @@ async fn main() -> anyhow::Result<()> {
                 );
                 tokio::spawn(rl_worker.run(worker_shutdown_rx.clone()));
                 info!("✅ Adaptive rate limiting worker started");
+
+                // ── Security compliance worker ─────────────────────────────
+                let sec_compliance_enabled = std::env::var("SEC_COMPLIANCE_ENABLED")
+                    .unwrap_or_else(|_| "true".to_string())
+                    .to_lowercase()
+                    != "false";
+                if sec_compliance_enabled {
+                    let sec_cfg = crate::security_compliance::config::SecurityComplianceConfig::from_env();
+                    let sec_repo = crate::security_compliance::repository::SecurityComplianceRepository::new(pool.clone());
+                    let sec_worker = crate::security_compliance::worker::SecurityComplianceWorker::new(
+                        sec_repo,
+                        sec_cfg,
+                    );
+                    tokio::spawn(sec_worker.run(worker_shutdown_rx.clone()));
+                    info!("✅ Security compliance worker started");
+                }
 
                 app
                     .layer(axum::middleware::from_fn_with_state(
