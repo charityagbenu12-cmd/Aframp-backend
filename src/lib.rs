@@ -114,6 +114,10 @@ pub mod masking;
 #[cfg(feature = "database")]
 pub mod gateway;
 
+// Reserve Vault — NGN collateral management, M-of-N multi-sig, custodian integration
+#[cfg(feature = "database")]
+pub mod vault;
+
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
 #[contracterror]
