@@ -960,7 +960,8 @@ fn register_all(r: &Registry) {
     crate::masking::metrics::register(r);
     crate::gateway::metrics::register(r);
     crate::analytics::metrics::register(r);
-    #[cfg(feature = "database")]
+    crate::adaptive_rate_limit::metrics::register(r);
+    crate::security_compliance::metrics::register(r);
 }
 
 // ---------------------------------------------------------------------------

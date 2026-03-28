@@ -122,6 +122,19 @@ pub mod gateway;
 // Consumer usage analytics & reporting system
 #[cfg(feature = "database")]
 pub mod analytics;
+// Adaptive rate limiting and throttling system
+#[cfg(feature = "cache")]
+pub mod adaptive_rate_limit;
+// mTLS certificate lifecycle management
+#[cfg(feature = "database")]
+pub mod mtls;
+
+// Comprehensive audit logging system
+#[cfg(feature = "database")]
+pub mod audit;
+// Microservice-to-microservice authentication
+#[cfg(feature = "database")]
+pub mod service_auth;
 
 // Abuse detection and automated response system
 #[cfg(feature = "database")]
