@@ -2,8 +2,8 @@
 mod tests {
     use super::*;
     use chrono::Utc;
-    serde_json::json;
-    uuid::Uuid;
+    use serde_json::json;
+    use uuid::Uuid;
 
     // Test password complexity validation
     #[test]

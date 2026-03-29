@@ -1,7 +1,4 @@
 //! Middleware modules for Aframp backend
-//!
-//! Provides request/response logging and error handling middleware
-
 #[cfg(feature = "database")]
 pub mod api_key;
 
@@ -18,12 +15,6 @@ pub mod hmac_signing;
 pub mod ip_blocking;
 
 #[cfg(feature = "database")]
-pub mod replay_prevention;
-
-#[cfg(feature = "database")]
-pub mod scope_middleware;
-
-#[cfg(feature = "database")]
 pub mod logging;
 
 pub mod metrics;
@@ -32,7 +23,13 @@ pub mod metrics;
 pub mod rate_limit;
 
 #[cfg(feature = "database")]
+pub mod replay_prevention;
+
+#[cfg(feature = "database")]
 pub mod request_integrity;
-// Security middleware
+
+#[cfg(feature = "database")]
+pub mod scope_middleware;
+
 pub mod cors;
 pub mod security;

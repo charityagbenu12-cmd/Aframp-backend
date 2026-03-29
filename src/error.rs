@@ -2,7 +2,6 @@
 //!
 //! This module provides a unified error system with proper HTTP status mapping,
 //! user-friendly messages, and structured error codes for client handling.
-
 #[cfg(feature = "database")]
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -505,6 +504,73 @@ impl From<StellarError> for AppError {
 /// Result type for operations that can fail with AppError
 #[cfg(feature = "database")]
 pub type AppResult<T> = Result<T, AppError>;
+
+/// Simple error type used by admin module handlers and middleware.
+/// Maps directly to HTTP status codes via IntoResponse.
+#[cfg(feature = "database")]
+#[derive(Debug, Clone)]
+pub enum Error {
+    /// 401 Unauthenticated
+    Authentication(String),
+    /// 403 Forbidden
+    Forbidden(String),
+    /// 404 Not Found
+    NotFound(String),
+    /// 400 Bad Request
+    BadRequest(String),
+    /// 409 Conflict
+    Conflict(String),
+    /// 429 Too Many Requests
+    TooManyRequests(String),
+    /// 500 Internal Server Error
+    Internal(String),
+}
+
+#[cfg(feature = "database")]
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Authentication(m) => write!(f, "Authentication error: {}", m),
+            Error::Forbidden(m) => write!(f, "Forbidden: {}", m),
+            Error::NotFound(m) => write!(f, "Not found: {}", m),
+            Error::BadRequest(m) => write!(f, "Bad request: {}", m),
+            Error::Conflict(m) => write!(f, "Conflict: {}", m),
+            Error::TooManyRequests(m) => write!(f, "Too many requests: {}", m),
+            Error::Internal(m) => write!(f, "Internal error: {}", m),
+        }
+    }
+}
+
+#[cfg(feature = "database")]
+impl std::error::Error for Error {}
+
+#[cfg(feature = "database")]
+impl axum::response::IntoResponse for Error {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::StatusCode;
+        use axum::Json;
+        use serde_json::json;
+
+        let (status, message) = match &self {
+            Error::Authentication(m) => (StatusCode::UNAUTHORIZED, m.clone()),
+            Error::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
+            Error::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
+            Error::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
+            Error::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            Error::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
+            Error::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),
+        };
+
+        (status, Json(json!({ "error": message }))).into_response()
+    }
+}
+
+#[cfg(feature = "database")]
+impl From<crate::database::error::DatabaseError> for Error {
+    fn from(e: crate::database::error::DatabaseError) -> Self {
+        Error::Internal(e.to_string())
+    }
+}
 
 #[cfg(all(test, feature = "database"))]
 mod tests {

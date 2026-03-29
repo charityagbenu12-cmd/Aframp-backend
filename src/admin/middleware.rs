@@ -16,6 +16,13 @@ use uuid::Uuid;
 pub struct AdminAuthState {
     pub auth_service: AdminAuthService,
     pub permission_repo: AdminPermissionRepository,
+    pub pool: sqlx::PgPool,
+}
+
+impl AdminAuthState {
+    pub fn pool(&self) -> sqlx::PgPool {
+        self.pool.clone()
+    }
 }
 
 #[derive(Clone)]

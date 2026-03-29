@@ -3,7 +3,6 @@
 //! All metrics are registered in a single global registry exposed at GET /metrics.
 //! Metric names follow Prometheus naming conventions: snake_case, unit suffix where
 //! applicable, and the `aframp_` namespace prefix.
-
 pub mod geo_restriction;
 pub mod handler;
 pub mod tests;
@@ -547,16 +546,15 @@ pub mod security {
     use super::*;
 
     static REQUEST_ANOMALY_FLAGS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static REPLAY_ATTEMPTS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static TIMESTAMP_REJECTIONS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
+    static TIMESTAMP_DELTA_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
 
     pub fn request_anomaly_flags_total() -> &'static CounterVec {
         REQUEST_ANOMALY_FLAGS_TOTAL
             .get()
             .expect("metrics not initialised")
     }
-
-    static REPLAY_ATTEMPTS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
-    static TIMESTAMP_REJECTIONS_TOTAL: OnceLock<CounterVec> = OnceLock::new();
-    static TIMESTAMP_DELTA_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
 
     /// Increment when a replay is detected (nonce already seen).
     pub fn replay_attempts_total() -> &'static CounterVec {
@@ -728,110 +726,6 @@ pub mod ip_detection {
 }
 
 // ---------------------------------------------------------------------------
-// Alerting-specific metrics (Issue #111)
-//
-// These metrics are consumed directly by Prometheus alert rules and are not
-// derived from existing counters/histograms. They expose state that cannot
-// be computed from rate() expressions alone.
-// ---------------------------------------------------------------------------
-
-pub mod alerting {
-    use super::*;
-    use prometheus::{register_counter_vec_with_registry, register_gauge_vec_with_registry};
-
-    /// Gauge: Unix timestamp (seconds) of the last successful exchange rate
-    /// update per currency pair. Alert rules compute staleness as
-    /// `time() - aframp_exchange_rate_last_updated_timestamp_seconds`.
-    static EXCHANGE_RATE_LAST_UPDATED: OnceLock<GaugeVec> = OnceLock::new();
-
-    /// Gauge: Unix timestamp (seconds) of the last completed worker cycle.
-    /// Alert rules compute missed-cycle age as
-    /// `time() - aframp_worker_last_cycle_timestamp_seconds`.
-    static WORKER_LAST_CYCLE_TIMESTAMP: OnceLock<GaugeVec> = OnceLock::new();
-
-    /// Gauge: Number of transactions currently in a pending state that have
-    /// exceeded the configured processing timeout.
-    static PENDING_TRANSACTIONS_STALE: OnceLock<GaugeVec> = OnceLock::new();
-
-    /// Counter: Total rate-limit breaches (HTTP 429 responses) by endpoint.
-    static RATE_LIMIT_BREACHES_TOTAL: OnceLock<CounterVec> = OnceLock::new();
-
-    pub fn exchange_rate_last_updated() -> &'static GaugeVec {
-        EXCHANGE_RATE_LAST_UPDATED
-            .get()
-            .expect("alerting metrics not initialised")
-    }
-
-    pub fn worker_last_cycle_timestamp() -> &'static GaugeVec {
-        WORKER_LAST_CYCLE_TIMESTAMP
-            .get()
-            .expect("alerting metrics not initialised")
-    }
-
-    pub fn pending_transactions_stale() -> &'static GaugeVec {
-        PENDING_TRANSACTIONS_STALE
-            .get()
-            .expect("alerting metrics not initialised")
-    }
-
-    pub fn rate_limit_breaches_total() -> &'static CounterVec {
-        RATE_LIMIT_BREACHES_TOTAL
-            .get()
-            .expect("alerting metrics not initialised")
-    }
-
-    pub(super) fn register(r: &Registry) {
-        EXCHANGE_RATE_LAST_UPDATED
-            .set(
-                register_gauge_vec_with_registry!(
-                    "aframp_exchange_rate_last_updated_timestamp_seconds",
-                    "Unix timestamp of the last successful exchange rate update per currency pair",
-                    &["currency_pair"],
-                    r
-                )
-                .unwrap(),
-            )
-            .ok();
-
-        WORKER_LAST_CYCLE_TIMESTAMP
-            .set(
-                register_gauge_vec_with_registry!(
-                    "aframp_worker_last_cycle_timestamp_seconds",
-                    "Unix timestamp of the last completed worker cycle",
-                    &["worker"],
-                    r
-                )
-                .unwrap(),
-            )
-            .ok();
-
-        PENDING_TRANSACTIONS_STALE
-            .set(
-                register_gauge_vec_with_registry!(
-                    "aframp_pending_transactions_stale_total",
-                    "Number of pending transactions that have exceeded the processing timeout",
-                    &["tx_type"],
-                    r
-                )
-                .unwrap(),
-            )
-            .ok();
-
-        RATE_LIMIT_BREACHES_TOTAL
-            .set(
-                register_counter_vec_with_registry!(
-                    "aframp_rate_limit_breaches_total",
-                    "Total rate-limit breaches (HTTP 429 responses) by endpoint",
-                    &["endpoint"],
-                    r
-                )
-                .unwrap(),
-            )
-            .ok();
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Register all metrics
 // ---------------------------------------------------------------------------
 
@@ -845,14 +739,7 @@ fn register_all(r: &Registry) {
     database::register(r);
     security::register(r);
     ip_detection::register(r);
-    alerting::register(r);
     crate::ddos::metrics::register(r);
-    crate::crypto::metrics::register(r);
-    crate::key_management::metrics::register(r);
-    crate::pentest::metrics::register(r);
-    crate::masking::metrics::register(r);
-    crate::gateway::metrics::register(r);
-    #[cfg(feature = "database")]
 }
 
 // ---------------------------------------------------------------------------

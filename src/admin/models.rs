@@ -77,6 +77,10 @@ pub enum AuditActionType {
     LoginFailure,
     AccountLocked,
     AccountUnlocked,
+    // Transaction operation actions
+    TransactionRetry,
+    TransactionRefund,
+    TransactionViewed,
 }
 
 // Admin role configuration

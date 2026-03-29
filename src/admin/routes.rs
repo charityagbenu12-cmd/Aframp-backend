@@ -1,5 +1,6 @@
 use crate::admin::handlers::*;
 use crate::admin::middleware::*;
+use crate::admin::transaction_handlers::*;
 use axum::{
     middleware::{self},
     routing::{get, post, delete, patch},
@@ -99,11 +100,14 @@ pub fn admin_permission_routes() -> Router<Arc<AdminAuthState>> {
         ))
 }
 
-pub fn operations_routes() -> Router<Arc<AdminServices>> {
+pub fn operations_routes() -> Router<Arc<AdminAuthState>> {
     Router::new()
-        // Operations admin routes
-        .route("/transactions", get(|| async { axum::Json("Transactions list") }))
-        .route("/transactions/:id", post(|| async { axum::Json("Transaction managed") }))
+        // Transaction admin routes
+        .route("/transactions", get(list_transactions_handler))
+        .route("/transactions/:tx_id", get(get_transaction_handler))
+        .route("/transactions/:tx_id/retry", post(retry_transaction_handler))
+        .route("/transactions/:tx_id/refund", post(refund_transaction_handler))
+        // KYC routes (stubs — implemented separately)
         .route("/kyc/review", get(|| async { axum::Json("KYC review list") }))
         .route("/kyc/:id/approve", post(|| async { axum::Json("KYC approved") }))
         .route("/kyc/:id/reject", post(|| async { axum::Json("KYC rejected") }))
@@ -253,14 +257,12 @@ pub fn v2_admin_routes() -> Router<Arc<AdminServices>> {
 // Route documentation
 pub const ADMIN_API_DOCS: &str = r#"
 # Admin Access Control API Documentation
-
 ## Authentication Endpoints
 - POST /api/admin/auth/login - Admin login
 - POST /api/admin/auth/mfa/setup - Setup MFA
 - POST /api/admin/auth/mfa/confirm - Confirm MFA setup
 - POST /api/admin/auth/mfa/verify/:session_id - Verify MFA
 - POST /api/admin/auth/password/change - Change password
-
 ## Account Management Endpoints
 - POST /api/admin/accounts - Create admin account (Super Admin only)
 - GET /api/admin/accounts - List admin accounts
@@ -269,54 +271,44 @@ pub const ADMIN_API_DOCS: &str = r#"
 - POST /api/admin/accounts/:id/suspend - Suspend admin account (Super Admin only)
 - POST /api/admin/accounts/:id/reinstate - Reinstate admin account (Super Admin only)
 - GET /api/admin/accounts/statistics - Get admin statistics
-
 ## Session Management Endpoints
 - GET /api/admin/sessions - Get active sessions
 - DELETE /api/admin/sessions/:id - Terminate specific session
 - DELETE /api/admin/sessions - Terminate all sessions except current
-
 ## Audit Trail Endpoints
 - GET /api/admin/audit - Get audit trail (Super Admin only)
 - GET /api/admin/audit/verify - Verify audit trail integrity (Super Admin only)
-
 ## Security Monitoring Endpoints
 - GET /api/admin/security/events - Get security events
 - POST /api/admin/security/events/:id/resolve - Resolve security event
 - GET /api/admin/security/statistics - Get security statistics
-
 ## Permission Management Endpoints
 - GET /api/admin/permissions - Get all permissions
 - GET /api/admin/permissions/roles/:role - Get permissions for role
 - GET /api/admin/permissions/roles - Get role configurations
-
 ## Operations Endpoints
 - GET /api/admin/operations/transactions - View transactions
 - POST /api/admin/operations/transactions/:id - Manage transaction
 - GET /api/admin/operations/kyc/review - Review KYC submissions
 - POST /api/admin/operations/kyc/:id/approve - Approve KYC
 - POST /api/admin/operations/kyc/:id/reject - Reject KYC
-
 ## Compliance Endpoints
 - GET /api/admin/compliance/reports - Generate compliance reports
 - GET /api/admin/compliance/regulatory - Access regulatory data
 - GET /api/admin/compliance/audit/export - Export audit data
-
 ## System Endpoints
 - GET /api/admin/system/config - View system configuration
 - PATCH /api/admin/system/config - Update system configuration
 - GET /api/admin/system/metrics - View system metrics
 - GET /api/admin/system/health - System health check
-
 ## Sensitive Action Endpoints
 - POST /api/admin/sensitive-actions/confirm - Request sensitive action confirmation
 - POST /api/admin/sensitive-actions/:action_type/execute - Execute sensitive action
-
 ## Headers
 - Authorization: Bearer <session_token> - Required for all authenticated endpoints
 - X-Sensitive-Action-Confirmation: <confirmation_id> - Required for sensitive actions
 - X-Forwarded-For: <ip_address> - Client IP address
 - User-Agent: <user_agent> - Client user agent
-
 ## Response Format
 All endpoints return JSON in the following format:
 ```json
@@ -326,7 +318,6 @@ All endpoints return JSON in the following format:
   "message": "Optional message"
 }
 ```
-
 ## Error Responses
 - 401 Unauthorized - Authentication required or invalid
 - 403 Forbidden - Insufficient permissions
@@ -334,3 +325,5 @@ All endpoints return JSON in the following format:
 - 429 Too Many Requests - Rate limit exceeded
 - 500 Internal Server Error - Server error
 "#;
+
+  
