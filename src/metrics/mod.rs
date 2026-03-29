@@ -108,6 +108,112 @@ pub mod http {
 }
 
 // ---------------------------------------------------------------------------
+// Service authentication metrics
+// ---------------------------------------------------------------------------
+
+pub mod service_auth {
+    use super::*;
+
+    static SERVICE_TOKEN_ACQUISITIONS: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_TOKEN_REFRESH_EVENTS: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_TOKEN_REFRESH_FAILURES: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_CALL_AUTHENTICATIONS: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_CALL_AUTHORIZATION_DENIALS: OnceLock<CounterVec> = OnceLock::new();
+
+    pub fn token_acquisitions() -> &'static CounterVec {
+        SERVICE_TOKEN_ACQUISITIONS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn token_refresh_events() -> &'static CounterVec {
+        SERVICE_TOKEN_REFRESH_EVENTS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn token_refresh_failures() -> &'static CounterVec {
+        SERVICE_TOKEN_REFRESH_FAILURES
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn service_call_authentications() -> &'static CounterVec {
+        SERVICE_CALL_AUTHENTICATIONS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn service_call_authorization_denials() -> &'static CounterVec {
+        SERVICE_CALL_AUTHORIZATION_DENIALS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub(super) fn register(r: &Registry) {
+        SERVICE_TOKEN_ACQUISITIONS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_token_acquisitions_total",
+                    "Total service token acquisitions by service",
+                    &["service_name"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_TOKEN_REFRESH_EVENTS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_token_refresh_events_total",
+                    "Total service token refresh events by service",
+                    &["service_name"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_TOKEN_REFRESH_FAILURES
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_token_refresh_failures_total",
+                    "Total service token refresh failures by service",
+                    &["service_name"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_CALL_AUTHENTICATIONS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_call_authentications_total",
+                    "Total service call authentications by calling service, endpoint, and result",
+                    &["calling_service", "endpoint", "result"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_CALL_AUTHORIZATION_DENIALS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_call_authorization_denials_total",
+                    "Total service call authorization denials by calling service, endpoint, and reason",
+                    &["calling_service", "endpoint", "reason"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // cNGN transaction metrics
 // ---------------------------------------------------------------------------
 
@@ -844,6 +950,7 @@ fn register_all(r: &Registry) {
     cache::register(r);
     database::register(r);
     security::register(r);
+    service_auth::register(r);
     ip_detection::register(r);
     alerting::register(r);
     crate::ddos::metrics::register(r);
@@ -852,8 +959,14 @@ fn register_all(r: &Registry) {
     crate::pentest::metrics::register(r);
     crate::masking::metrics::register(r);
     crate::gateway::metrics::register(r);
+
     backup::register(r);
     #[cfg(feature = "database")]
+
+    crate::analytics::metrics::register(r);
+    crate::adaptive_rate_limit::metrics::register(r);
+    crate::security_compliance::metrics::register(r);
+
 }
 
 // ---------------------------------------------------------------------------

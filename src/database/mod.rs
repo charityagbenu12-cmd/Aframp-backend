@@ -1,6 +1,7 @@
 // This module requires std library (not available in WASM)
 
 pub mod bill_payment_repository;
+pub mod consumer_rate_limit_repository;
 pub mod conversion_audit_repository;
 pub mod error;
 pub mod exchange_rate_repository;

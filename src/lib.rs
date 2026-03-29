@@ -99,6 +99,10 @@ pub mod metrics;
 #[cfg(feature = "cache")]
 pub mod ddos;
 
+// Microservice-to-microservice authentication
+#[cfg(feature = "database")]
+pub mod service_auth;
+
 // End-to-end payload encryption (Issue — Data Security & Encryption)
 #[cfg(feature = "database")]
 pub mod crypto;
@@ -106,6 +110,7 @@ pub mod crypto;
 // Platform key management framework (Issue — Key Management & Rotation)
 #[cfg(feature = "database")]
 pub mod key_management;
+
 // Penetration testing & security review framework
 #[cfg(feature = "database")]
 pub mod pentest;
@@ -117,6 +122,31 @@ pub mod masking;
 // API gateway security policy enforcement
 #[cfg(feature = "database")]
 pub mod gateway;
+
+// Consumer usage analytics & reporting system
+#[cfg(feature = "database")]
+pub mod analytics;
+// Adaptive rate limiting and throttling system
+#[cfg(feature = "cache")]
+pub mod adaptive_rate_limit;
+// mTLS certificate lifecycle management
+#[cfg(feature = "database")]
+pub mod mtls;
+
+// Comprehensive audit logging system
+#[cfg(feature = "database")]
+pub mod audit;
+// Microservice-to-microservice authentication
+#[cfg(feature = "database")]
+pub mod service_auth;
+
+// Abuse detection and automated response system
+#[cfg(feature = "database")]
+pub mod abuse_detection;
+
+// Audit logging system
+#[cfg(feature = "database")]
+pub mod audit;
 
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]

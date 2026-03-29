@@ -1,5 +1,7 @@
+mod adaptive_rate_limit;
 mod api;
 mod api_keys;
+mod analytics;
 mod audit;
 mod auth;
 mod cache;
@@ -19,6 +21,7 @@ mod oauth;
 mod payments;
 mod pentest;
 mod recurring;
+mod security_compliance;
 mod services;
 mod telemetry;
 mod workers;
@@ -1293,6 +1296,94 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
     };
 
+    // ── Adaptive rate limit admin routes ─────────────────────────────────────
+    let adaptive_rl_admin_routes = if let (Some(pool), Some(cache)) = (db_pool.clone(), redis_cache.clone()) {
+        let rl_cfg = crate::adaptive_rate_limit::config::AdaptiveRateLimitConfig::from_env();
+        let signals = std::sync::Arc::new(
+            crate::adaptive_rate_limit::signals::SignalCollector::new(
+                std::sync::Arc::new(cache.clone()),
+                pool.clone(),
+                rl_cfg.rolling_window_size,
+            ),
+        );
+        let rl_repo = crate::adaptive_rate_limit::repository::AdaptiveRateLimitRepository::new(pool.clone());
+        let rl_engine = std::sync::Arc::new(
+            crate::adaptive_rate_limit::engine::AdaptiveRateLimitEngine::new(
+                rl_cfg,
+                signals,
+                std::sync::Arc::new(cache.clone()),
+                rl_repo,
+            ),
+        );
+        let admin_state = crate::adaptive_rate_limit::handlers::AdaptiveRateLimitAdminState {
+            engine: rl_engine,
+        };
+        Router::new()
+            .route(
+                "/api/admin/adaptive-rate-limit/status",
+                get(crate::adaptive_rate_limit::handlers::get_status),
+            )
+            .route(
+                "/api/admin/adaptive-rate-limit/override",
+                post(crate::adaptive_rate_limit::handlers::set_override)
+                    .delete(crate::adaptive_rate_limit::handlers::clear_override),
+            )
+            .with_state(admin_state)
+    } else {
+        Router::new()
+    };
+
+    // ── Security compliance admin routes ──────────────────────────────────────
+    let security_compliance_routes = if let Some(ref pool) = db_pool {
+        let sec_cfg = crate::security_compliance::config::SecurityComplianceConfig::from_env();
+        let sec_repo = crate::security_compliance::repository::SecurityComplianceRepository::new(pool.clone());
+        let sec_state = crate::security_compliance::handlers::SecurityComplianceState {
+            repo: std::sync::Arc::new(sec_repo),
+            config: std::sync::Arc::new(sec_cfg),
+        };
+        Router::new()
+            .route(
+                "/api/admin/security/vulnerabilities",
+                get(crate::security_compliance::handlers::list_vulnerabilities),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id",
+                get(crate::security_compliance::handlers::get_vulnerability),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id/acknowledge",
+                post(crate::security_compliance::handlers::acknowledge_vulnerability),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id/resolve",
+                post(crate::security_compliance::handlers::resolve_vulnerability),
+            )
+            .route(
+                "/api/admin/security/vulnerabilities/:vuln_id/accept-risk",
+                post(crate::security_compliance::handlers::accept_risk),
+            )
+            .route(
+                "/api/admin/security/compliance/posture",
+                get(crate::security_compliance::handlers::get_posture),
+            )
+            .route(
+                "/api/admin/security/findings/ingest",
+                post(crate::security_compliance::handlers::ingest_finding),
+            )
+            .route(
+                "/api/admin/security/allowlist",
+                get(crate::security_compliance::handlers::list_allowlist)
+                    .post(crate::security_compliance::handlers::add_allowlist_entry),
+            )
+            .route(
+                "/api/admin/security/reports",
+                get(crate::security_compliance::handlers::list_reports),
+            )
+            .with_state(sec_state)
+    } else {
+        Router::new()
+    };
+
     // ── mTLS certificate lifecycle — Issue #204 ───────────────────────────────
     // Provision the intermediate CA and start the lifecycle worker.
     // The admin routes are always available (they operate on the in-memory store).
@@ -1433,6 +1524,30 @@ async fn main() -> anyhow::Result<()> {
             .merge(api::key_rotation::admin_rotation_router(rotation_state))
     } else {
         info!("Skipping key rotation routes (no database)");
+        Router::new()
+    };
+
+    // ── Consumer usage analytics worker ──────────────────────────────────────
+    let analytics_routes = if let Some(pool) = db_pool.clone() {
+        let analytics_config = analytics::worker::AnalyticsWorkerConfig::default();
+        let analytics_worker = analytics::worker::AnalyticsWorker::new(
+            std::sync::Arc::new(pool.clone()),
+            analytics_config,
+        );
+        tokio::spawn(analytics_worker.run(worker_shutdown_rx.clone()));
+        info!("✅ Analytics worker started");
+        
+        // Create analytics routes
+        let analytics_repo = std::sync::Arc::new(analytics::repository::AnalyticsRepository::new(pool));
+        Router::new()
+            .nest("/api/developer", analytics::routes::consumer_analytics_routes())
+            .nest("/api/admin/analytics", analytics::routes::admin_analytics_routes())
+            .with_state(analytics_repo)
+    } else {
+        info!("Skipping analytics worker (no database)");
+        Router::new()
+    };
+
     // ── Developer self-service key routes (Issue #131) ───────────────────────
     let developer_routes = if let Some(pool) = db_pool.clone() {
         let dev_state = api::developer::keys::DeveloperKeysState {
@@ -1557,7 +1672,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth_routes)
         .merge(batch_routes)
         .merge(admin_routes)
-        .merge(key_rotation_routes)
+        .merge(adaptive_rl_admin_routes)
         .merge(openapi_routes)
         .merge(recurring_routes)
     let app = Router::new()
@@ -1605,8 +1720,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth_routes)
         .merge(batch_routes)
         .merge(admin_routes)
+        .merge(adaptive_rl_admin_routes)
         .merge(audit_routes)
         .merge(key_rotation_routes)
+        .merge(analytics_routes)
         .merge(openapi_routes)
         .merge(recurring_routes)
         .merge(developer_routes)
@@ -1616,6 +1733,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(pentest_routes)
         .merge(developer_portal::routes::register_developer_portal_routes(Router::new(), db_pool.clone()))
         .merge(Router::new().nest("/api/admin/security", mtls_admin_routes))
+        .merge(security_compliance_routes)
         .with_state(AppState {
             db_pool,
             redis_cache,
@@ -1707,6 +1825,79 @@ async fn main() -> anyhow::Result<()> {
         let replay_state = crate::middleware::replay_prevention::ReplayPreventionState {
             redis: std::sync::Arc::new(cache.pool.clone()),
             config: std::sync::Arc::new(crate::middleware::replay_prevention::ReplayConfig::from_env()),
+        };
+
+        // ── Adaptive rate limiting ────────────────────────────────────────────
+        let adaptive_rl_enabled = std::env::var("ADAPTIVE_RL_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .to_lowercase()
+            != "false";
+
+        let app = if adaptive_rl_enabled {
+            if let Some(ref pool) = db_pool {
+                let rl_cfg = crate::adaptive_rate_limit::config::AdaptiveRateLimitConfig::from_env();
+                let signals = std::sync::Arc::new(
+                    crate::adaptive_rate_limit::signals::SignalCollector::new(
+                        std::sync::Arc::new(cache.clone()),
+                        pool.clone(),
+                        rl_cfg.rolling_window_size,
+                    ),
+                );
+                let rl_repo = crate::adaptive_rate_limit::repository::AdaptiveRateLimitRepository::new(pool.clone());
+                let rl_engine = std::sync::Arc::new(
+                    crate::adaptive_rate_limit::engine::AdaptiveRateLimitEngine::new(
+                        rl_cfg,
+                        signals,
+                        std::sync::Arc::new(cache.clone()),
+                        rl_repo.clone(),
+                    ),
+                );
+                let emergency_queue = std::sync::Arc::new(
+                    crate::adaptive_rate_limit::queue::EmergencyQueue::new(
+                        rl_engine.config.emergency_queue_max_depth,
+                    ),
+                );
+                let rl_state = crate::adaptive_rate_limit::middleware::AdaptiveRateLimitState {
+                    engine: rl_engine.clone(),
+                    emergency_queue,
+                    cache: std::sync::Arc::new(cache.clone()),
+                };
+
+                // Start the adaptive rl worker
+                let rl_worker = crate::adaptive_rate_limit::worker::AdaptiveRateLimitWorker::new(
+                    rl_engine.clone(),
+                    rl_repo,
+                );
+                tokio::spawn(rl_worker.run(worker_shutdown_rx.clone()));
+                info!("✅ Adaptive rate limiting worker started");
+
+                // ── Security compliance worker ─────────────────────────────
+                let sec_compliance_enabled = std::env::var("SEC_COMPLIANCE_ENABLED")
+                    .unwrap_or_else(|_| "true".to_string())
+                    .to_lowercase()
+                    != "false";
+                if sec_compliance_enabled {
+                    let sec_cfg = crate::security_compliance::config::SecurityComplianceConfig::from_env();
+                    let sec_repo = crate::security_compliance::repository::SecurityComplianceRepository::new(pool.clone());
+                    let sec_worker = crate::security_compliance::worker::SecurityComplianceWorker::new(
+                        sec_repo,
+                        sec_cfg,
+                    );
+                    tokio::spawn(sec_worker.run(worker_shutdown_rx.clone()));
+                    info!("✅ Security compliance worker started");
+                }
+
+                app
+                    .layer(axum::middleware::from_fn_with_state(
+                        rl_state,
+                        crate::adaptive_rate_limit::middleware::adaptive_rate_limit_middleware,
+                    ))
+            } else {
+                app
+            }
+        } else {
+            info!("⏭️  Adaptive rate limiting disabled (ADAPTIVE_RL_ENABLED=false)");
+            app
         };
 
         app
