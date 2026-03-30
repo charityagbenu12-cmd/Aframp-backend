@@ -61,10 +61,14 @@ pub enum OfframpState {
     PendingPayment,
     CngnReceived,
     VerifyingAmount,
+    Burning,
+    Burned,
     ProcessingWithdrawal,
     TransferPending,
     Completed,
     RefundInitiated,
+    DisbursementFailed,
+    PendingRefund,
     Refunding,
     Refunded,
     Failed,
@@ -77,10 +81,14 @@ impl OfframpState {
             OfframpState::PendingPayment => "pending_payment",
             OfframpState::CngnReceived => "cngn_received",
             OfframpState::VerifyingAmount => "verifying_amount",
+            OfframpState::Burning => "burning",
+            OfframpState::Burned => "burned",
             OfframpState::ProcessingWithdrawal => "processing_withdrawal",
             OfframpState::TransferPending => "transfer_pending",
             OfframpState::Completed => "completed",
             OfframpState::RefundInitiated => "refund_initiated",
+            OfframpState::DisbursementFailed => "disbursement_failed",
+            OfframpState::PendingRefund => "pending_refund",
             OfframpState::Refunding => "refunding",
             OfframpState::Refunded => "refunded",
             OfframpState::Failed => "failed",
@@ -93,10 +101,14 @@ impl OfframpState {
             "pending_payment" => Some(OfframpState::PendingPayment),
             "cngn_received" => Some(OfframpState::CngnReceived),
             "verifying_amount" => Some(OfframpState::VerifyingAmount),
+            "burning" => Some(OfframpState::Burning),
+            "burned" => Some(OfframpState::Burned),
             "processing_withdrawal" => Some(OfframpState::ProcessingWithdrawal),
             "transfer_pending" => Some(OfframpState::TransferPending),
             "completed" => Some(OfframpState::Completed),
             "refund_initiated" => Some(OfframpState::RefundInitiated),
+            "disbursement_failed" => Some(OfframpState::DisbursementFailed),
+            "pending_refund" => Some(OfframpState::PendingRefund),
             "refunding" => Some(OfframpState::Refunding),
             "refunded" => Some(OfframpState::Refunded),
             "failed" => Some(OfframpState::Failed),
@@ -111,7 +123,10 @@ impl OfframpState {
             // Normal flow
             (OfframpState::PendingPayment, OfframpState::CngnReceived) => true,
             (OfframpState::CngnReceived, OfframpState::VerifyingAmount) => true,
-            (OfframpState::VerifyingAmount, OfframpState::ProcessingWithdrawal) => true,
+            (OfframpState::VerifyingAmount, OfframpState::Burning) => true,
+            (OfframpState::Burning, OfframpState::Burned) => true,
+            (OfframpState::Burning, OfframpState::Failed) => true,
+            (OfframpState::Burned, OfframpState::ProcessingWithdrawal) => true,
             (OfframpState::ProcessingWithdrawal, OfframpState::TransferPending) => true,
             (OfframpState::TransferPending, OfframpState::Completed) => true,
 
@@ -121,7 +136,10 @@ impl OfframpState {
             {
                 true
             }
-            (OfframpState::RefundInitiated, OfframpState::Refunding) => true,
+            (OfframpState::TransferPending, OfframpState::DisbursementFailed) => true,
+            (OfframpState::DisbursementFailed, OfframpState::TransferPending) => true, // retry
+            (OfframpState::DisbursementFailed, OfframpState::PendingRefund) => true,
+            (OfframpState::PendingRefund, OfframpState::Refunding) => true,
             (OfframpState::Refunding, OfframpState::Refunded) => true,
             (OfframpState::Refunding, OfframpState::Failed) => true,
 
@@ -178,6 +196,8 @@ pub struct OfframpMetadata {
 
     // Refund tracking
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub burn_tx_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub refund_tx_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refund_confirmed_at: Option<String>,
@@ -209,6 +229,7 @@ impl OfframpMetadata {
             next_retry_after: None,
             failure_reason: None,
             is_retryable: false,
+            burn_tx_hash: None,
             refund_tx_hash: None,
             refund_confirmed_at: None,
             refund_amount: None,
@@ -382,6 +403,11 @@ impl OfframpProcessorWorker {
             error!(error = %e, "failed to process received payments");
         }
 
+        // Stage 1.5: Burn Processing
+        if let Err(e) = self.process_burns().await {
+            error!(error = %e, "failed to process burns");
+        }
+
         // Stage 2: Withdrawal Initiation
         if let Err(e) = self.process_withdrawal_initiations().await {
             error!(error = %e, "failed to process withdrawal initiations");
@@ -392,7 +418,12 @@ impl OfframpProcessorWorker {
             error!(error = %e, "failed to process transfer monitoring");
         }
 
-        // Stage 4: Refund Processing
+        // Stage 4: Disbursement Failure Handling (Retries)
+        if let Err(e) = self.process_disbursement_failures().await {
+            error!(error = %e, "failed to process disbursement failures");
+        }
+
+        // Stage 5: Refund Processing
         if let Err(e) = self.process_refunds().await {
             error!(error = %e, "failed to process refunds");
         }
@@ -516,23 +547,86 @@ impl OfframpProcessorWorker {
                 continue;
             }
 
-            // Amounts matched perfectly, proceed to transfer
-            let next_status = OfframpState::ProcessingWithdrawal;
+            // Amounts matched perfectly, proceed to burn
+            let next_status = OfframpState::Burning;
             repo.update_status(&tx_id, next_status.as_str()).await?;
-            info!(transaction_id = %tx_id, "cNGN payment verified perfectly, moving to withdrawal initiation");
+            info!(transaction_id = %tx_id, "cNGN payment verified perfectly, moving to burn phase");
             
-            self.notification_service.send_notification(&tx, NotificationType::CngnReceived, "Stellar payment received and precisely verified, processing bank transfer").await;
+            self.notification_service.send_notification(&tx, NotificationType::CngnReceived, "Stellar payment received and precisely verified, initiating burn before disbursement").await;
+        }
+
+        Ok(())
+    }
+
+    /// Stage 1.5: Burn Processing
+    /// Sends cNGN from system wallet to issuer to "burn" it before bank transfer.
+    async fn process_burns(&self) -> Result<(), OfframpError> {
+        let repo = TransactionRepository::new(self.pool.clone());
+        let transactions = repo
+            .find_offramps_by_status("burning", self.config.batch_size)
+            .await?;
+
+        let builder = CngnPaymentBuilder::new(self.stellar_client.clone());
+        let cngn_issuer = std::env::var("CNGN_ISSUER_TESTNET")
+            .or_else(|_| std::env::var("CNGN_ISSUER_MAINNET"))
+            .unwrap_or_default();
+
+        for tx in transactions {
+            let tx_id = tx.transaction_id.to_string();
+            let mut metadata = OfframpMetadata::from_json(&tx.metadata)?;
+
+            info!(transaction_id = %tx_id, "burning cNGN to issuer");
+
+            let amount_str = tx.amount_cngn.to_string();
+            let memo = CngnMemo::Text(format!("burn:{}", tx_id));
+
+            match builder.build_payment(
+                &self.config.system_wallet_address,
+                &cngn_issuer,
+                &amount_str,
+                memo,
+                None
+            ).await {
+                Ok(draft) => {
+                    match builder.sign_payment(draft, &self.config.hot_wallet_secret) {
+                        Ok(signed) => {
+                            match builder.submit_signed_payment(&signed.signed_envelope_xdr).await {
+                                Ok(_) => {
+                                    info!(transaction_id = %tx_id, hash = %signed.draft.transaction_hash, "burn successful");
+                                    metadata.burn_tx_hash = Some(signed.draft.transaction_hash);
+                                    repo.update_status_with_metadata(&tx_id, OfframpState::Burned.as_str(), metadata.to_json()).await?;
+                                }
+                                Err(e) => {
+                                    error!(transaction_id = %tx_id, error = %e, "burn submission failed");
+                                    metadata.failure_reason = Some(format!("Burn sub error: {}", e));
+                                    repo.update_status_with_metadata(&tx_id, OfframpState::Failed.as_str(), metadata.to_json()).await?;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(transaction_id = %tx_id, error = %e, "burn signing failed");
+                            metadata.failure_reason = Some(format!("Burn sign error: {}", e));
+                            repo.update_status_with_metadata(&tx_id, OfframpState::Failed.as_str(), metadata.to_json()).await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(transaction_id = %tx_id, error = %e, "burn build failed");
+                    metadata.failure_reason = Some(format!("Burn build error: {}", e));
+                    repo.update_status_with_metadata(&tx_id, OfframpState::Failed.as_str(), metadata.to_json()).await?;
+                }
+            }
         }
 
         Ok(())
     }
 
     /// Stage 2: Withdrawal Initiation
-    /// Selects transactions with 'processing_withdrawal' status and initiates the bank transfer.
+    /// Selects transactions with 'burned' status and initiates the bank transfer.
     async fn process_withdrawal_initiations(&self) -> Result<(), OfframpError> {
         let repo = TransactionRepository::new(self.pool.clone());
         let transactions = repo
-            .find_offramps_by_status("processing_withdrawal", self.config.batch_size)
+            .find_offramps_by_status("burned", self.config.batch_size)
             .await?;
 
         for tx in transactions {
@@ -689,16 +783,27 @@ impl OfframpProcessorWorker {
                         }
                         crate::payments::types::PaymentState::Failed => {
                             error!(transaction_id = %tx_id, "transfer failed at provider");
-                            metadata.failure_reason = response
-                                .failure_reason
-                                .or(Some("Provider reported failure".to_string()));
-                            repo.update_status_with_metadata(
-                                &tx_id,
-                                OfframpState::RefundInitiated.as_str(),
-                                metadata.to_json(),
-                            )
-                            .await?;
-                            self.notification_service.send_notification(&tx, NotificationType::OfframpFailed, "Bank transfer failed, initiating refund").await;
+                            let reason = response.failure_reason.clone().unwrap_or_else(|| "Provider reported failure".to_string());
+                            metadata.failure_reason = Some(reason.clone());
+                            
+                            if is_transient_disbursement_error(&reason) {
+                                info!(transaction_id = %tx_id, reason = %reason, "transient disbursement failure detected, moving to DISBURSEMENT_FAILED for retry");
+                                repo.update_status_with_metadata(
+                                    &tx_id,
+                                    OfframpState::DisbursementFailed.as_str(),
+                                    metadata.to_json(),
+                                )
+                                .await?;
+                            } else {
+                                warn!(transaction_id = %tx_id, reason = %reason, "permanent disbursement failure detected, moving to PENDING_REFUND");
+                                repo.update_status_with_metadata(
+                                    &tx_id,
+                                    OfframpState::PendingRefund.as_str(),
+                                    metadata.to_json(),
+                                )
+                                .await?;
+                                self.notification_service.send_notification(&tx, NotificationType::OfframpFailed, "Bank transfer failed permanently due to account issues, initiating refund").await;
+                            }
                         }
                         crate::payments::types::PaymentState::Pending
                         | crate::payments::types::PaymentState::Processing => {
@@ -770,109 +875,130 @@ impl OfframpProcessorWorker {
         Ok(())
     }
 
-    /// Stage 4: Refund Processing
-    /// Selects transactions with 'refund_initiated' status and processes the Stellar refund.
+    /// Stage 5: Refund Processing
+    /// Selects transactions with 'pending_refund' or 'refund_initiated' status and enqueues a Re-Mint request.
     async fn process_refunds(&self) -> Result<(), OfframpError> {
         let repo = TransactionRepository::new(self.pool.clone());
-        let transactions = repo
-            .find_offramps_by_status("refund_initiated", self.config.batch_size)
-            .await?;
+        
+        // Fetch both legacy and new refund states
+        let mut transactions = repo.find_offramps_by_status("pending_refund", self.config.batch_size).await?;
+        let legacy_transactions = repo.find_offramps_by_status("refund_initiated", self.config.batch_size).await?;
+        transactions.extend(legacy_transactions);
 
         for tx in transactions {
             let tx_id = tx.transaction_id.to_string();
-            info!(transaction_id = %tx_id, "processing refund for transaction");
+            info!(transaction_id = %tx_id, "processing Re-Mint refund for transaction");
 
             let mut metadata = OfframpMetadata::from_json(&tx.metadata)?;
 
-            // Build refund payment on Stellar
-            let builder = CngnPaymentBuilder::new(self.stellar_client.clone());
-
-            let amount_str = tx.cngn_amount.to_string();
-            // The user req is: `REFUND-{original_memo}`. Here the original memo used was either the tx_id or WD-{tx_id}.
-            // We ensure it fits the 28 char Stellar text memo limit.
-            let memo_str = format!("REFUND-{}", tx_id);
-            let memo_str = if memo_str.len() > 28 {
-                memo_str[..28].to_string()
-            } else {
-                memo_str
+            // Enqueue Refund-Mint request
+            let mint_req = crate::services::mint_queue::MintRequest {
+                transaction_id: tx.transaction_id,
+                priority: 10, // Urgent for refunds
+                partner_tier: tx.partner_tier.clone(),
+                mint_type: crate::services::mint_queue::MintType::Refund,
+                linked_burn_hash: metadata.burn_tx_hash.clone(),
             };
-            
-            let memo = CngnMemo::Text(memo_str);
 
             repo.update_status(&tx_id, OfframpState::Refunding.as_str())
                 .await?;
 
-            match builder
-                .build_payment(
-                    &self.config.system_wallet_address,
-                    &tx.wallet_address,
-                    &amount_str,
-                    memo,
-                    None,
+            if let Err(e) = self.queue.enqueue(mint_req).await {
+                error!(transaction_id = %tx_id, error = %e, "failed to enqueue refund-mint request");
+                metadata.failure_reason = Some(format!("Queue error: {}", e));
+                repo.update_status_with_metadata(
+                    &tx_id,
+                    OfframpState::Failed.as_str(),
+                    metadata.to_json(),
                 )
-                .await
-            {
-                Ok(draft) => match builder.sign_payment(draft, &self.config.hot_wallet_secret) {
-                    Ok(signed) => {
-                        match builder
-                            .submit_signed_payment(&signed.signed_envelope_xdr)
-                            .await
-                        {
-                            Ok(response) => {
-                                info!(transaction_id = %tx_id, "refund submitted successfully to Stellar");
-
-                                metadata.refund_tx_hash = Some(signed.draft.transaction_hash);
-                                metadata.refund_amount = Some(amount_str);
-                                metadata.refund_confirmed_at =
-                                    Some(chrono::Utc::now().to_rfc3339());
-
-                                repo.update_status_with_metadata(
-                                    &tx_id,
-                                    OfframpState::Refunded.as_str(),
-                                    metadata.to_json(),
-                                )
-                                .await?;
-                                self.notification_service.send_notification(&tx, NotificationType::OfframpRefunded, "Refund successful on Stellar").await;
-                            }
-                            Err(e) => {
-                                error!(transaction_id = %tx_id, error = %e, "failed to submit refund transaction");
-                                metadata.failure_reason =
-                                    Some(format!("Stellar submission error: {}", e));
-                                repo.update_status_with_metadata(
-                                    &tx_id,
-                                    OfframpState::Failed.as_str(),
-                                    metadata.to_json(),
-                                )
-                                .await?;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(transaction_id = %tx_id, error = %e, "failed to sign refund transaction");
-                        metadata.failure_reason = Some(format!("Stellar signing error: {}", e));
-                        repo.update_status_with_metadata(
-                            &tx_id,
-                            OfframpState::Failed.as_str(),
-                            metadata.to_json(),
-                        )
-                        .await?;
-                    }
-                },
-                Err(e) => {
-                    error!(transaction_id = %tx_id, error = %e, "failed to build refund transaction");
-                    metadata.failure_reason = Some(format!("Stellar build error: {}", e));
-                    repo.update_status_with_metadata(
-                        &tx_id,
-                        OfframpState::Failed.as_str(),
-                        metadata.to_json(),
-                    )
-                    .await?;
-                }
+                .await?;
+                continue;
             }
+
+            info!(transaction_id = %tx_id, "Refund-Mint request successfully enqueued");
+            
+            self.notification_service.send_notification(&tx, NotificationType::OfframpFailed, "Bank transfer failed permanently. Your cNGN is being Re-Minted back to your wallet.").await;
         }
 
         Ok(())
     }
+
+    /// Stage 4: Disbursement Failure Handling
+    /// Selects transactions with 'disbursement_failed' status and implements retry logic with exponential backoff.
+    async fn process_disbursement_failures(&self) -> Result<(), OfframpError> {
+        let repo = TransactionRepository::new(self.pool.clone());
+        let transactions = repo
+            .find_offramps_by_status("disbursement_failed", self.config.batch_size)
+            .await?;
+
+        for tx in transactions {
+            let tx_id = tx.transaction_id.to_string();
+            let mut metadata = OfframpMetadata::from_json(&tx.metadata)?;
+
+            // Respect backoff delay
+            if let Some(next_retry) = &metadata.next_retry_after {
+                if let Ok(next_dt) = chrono::DateTime::parse_from_rfc3339(next_retry) {
+                    if chrono::Utc::now() < next_dt.with_timezone(&chrono::Utc) {
+                        continue;
+                    }
+                }
+            }
+
+            let attempt = metadata.retry_count + 1;
+            let max_retries = 3;
+
+            if attempt > max_retries {
+                error!(transaction_id = %tx_id, "max retries exceeded for transient disbursement failure");
+                metadata.failure_reason = Some(format!("Max retries ({}) exceeded for transient error", max_retries));
+                repo.update_status_with_metadata(&tx_id, OfframpState::PendingRefund.as_str(), metadata.to_json()).await?;
+                self.notification_service.send_notification(&tx, NotificationType::OfframpFailed, "Bank transfer failed after multiple retries, initiating refund").await;
+                continue;
+            }
+
+            // Schedule retry
+            info!(transaction_id = %tx_id, attempt = attempt, "retrying disbursement after transient failure");
+            
+            // Map attempted retry count to backoff: 1=1m, 2=5m, 3=15m
+            let delay_mins = match attempt {
+                1 => 1,
+                2 => 5,
+                _ => 15,
+            };
+
+            metadata.retry_count = attempt;
+            metadata.last_retry_at = Some(chrono::Utc::now().to_rfc3339());
+            let next_retry = chrono::Utc::now() + chrono::Duration::minutes(delay_mins);
+            metadata.next_retry_after = Some(next_retry.to_rfc3339());
+
+            // Transition back to ProcessingWithdrawal to trigger a new provider request
+            repo.update_status_with_metadata(&tx_id, OfframpState::ProcessingWithdrawal.as_str(), metadata.to_json()).await?;
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn is_transient_disbursement_error(reason: &str) -> bool {
+    let r = reason.to_uppercase();
+    r.contains("PROVIDER_TIMEOUT") || 
+    r.contains("NETWORK_DOWN") || 
+    r.contains("OUTAGE") ||
+    r.contains("RATE_LIMIT") ||
+    r.contains("TIMEOUT") ||
+    r.contains("SERVICE_UNAVAILABLE")
+}
+
+fn is_permanent_disbursement_error(reason: &str) -> bool {
+    let r = reason.to_uppercase();
+    r.contains("ACCOUNT_BLOCKED") || 
+    r.contains("INVALID_ACCOUNT") || 
+    r.contains("INSUFFICIENT_FUNDS_IN_RESERVE") ||
+    r.contains("BLACKLISTED") ||
+    r.contains("REJECTED_BY_BANK")
 }
 
 // ---------------------------------------------------------------------------
@@ -888,9 +1014,9 @@ mod tests {
         // Valid transitions
         assert!(OfframpState::PendingPayment.can_transition_to(&OfframpState::CngnReceived));
         assert!(OfframpState::CngnReceived.can_transition_to(&OfframpState::VerifyingAmount));
-        assert!(
-            OfframpState::VerifyingAmount.can_transition_to(&OfframpState::ProcessingWithdrawal)
-        );
+        assert!(OfframpState::VerifyingAmount.can_transition_to(&OfframpState::Burning));
+        assert!(OfframpState::Burning.can_transition_to(&OfframpState::Burned));
+        assert!(OfframpState::Burned.can_transition_to(&OfframpState::ProcessingWithdrawal));
         assert!(
             OfframpState::ProcessingWithdrawal.can_transition_to(&OfframpState::TransferPending)
         );
@@ -898,7 +1024,9 @@ mod tests {
         assert!(
             OfframpState::ProcessingWithdrawal.can_transition_to(&OfframpState::RefundInitiated)
         );
-        assert!(OfframpState::RefundInitiated.can_transition_to(&OfframpState::Refunding));
+        assert!(OfframpState::TransferPending.can_transition_to(&OfframpState::DisbursementFailed));
+        assert!(OfframpState::DisbursementFailed.can_transition_to(&OfframpState::PendingRefund));
+        assert!(OfframpState::PendingRefund.can_transition_to(&OfframpState::Refunding));
         assert!(OfframpState::Refunding.can_transition_to(&OfframpState::Refunded));
         assert!(OfframpState::PendingPayment.can_transition_to(&OfframpState::Expired));
 
@@ -915,8 +1043,11 @@ mod tests {
     fn offramp_state_string_conversion() {
         assert_eq!(OfframpState::PendingPayment.as_str(), "pending_payment");
         assert_eq!(OfframpState::CngnReceived.as_str(), "cngn_received");
+        assert_eq!(OfframpState::Burning.as_str(), "burning");
+        assert_eq!(OfframpState::Burned.as_str(), "burned");
         assert_eq!(OfframpState::Completed.as_str(), "completed");
-        assert_eq!(OfframpState::RefundInitiated.as_str(), "refund_initiated");
+        assert_eq!(OfframpState::DisbursementFailed.as_str(), "disbursement_failed");
+        assert_eq!(OfframpState::PendingRefund.as_str(), "pending_refund");
         assert_eq!(OfframpState::Refunding.as_str(), "refunding");
         assert_eq!(OfframpState::Refunded.as_str(), "refunded");
         assert_eq!(OfframpState::Failed.as_str(), "failed");

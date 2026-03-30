@@ -315,8 +315,16 @@ impl TransactionMonitorWorker {
         let tx_repo = TransactionRepository::new(self.pool.clone());
 
         if record.successful {
+            let current_status = tx_repo.find_status_by_id(transaction_id).await.unwrap_or_default();
+            
+            let next_status = match current_status.as_str() {
+                "burning" => "burned",
+                "refunding" => "refunded",
+                _ => "completed",
+            };
+
             tx_repo
-                .update_status_with_metadata(transaction_id, "completed", updated.clone())
+                .update_status_with_metadata(transaction_id, next_status, updated.clone())
                 .await?;
 
             // Also write the confirmed hash to the dedicated column.
@@ -329,6 +337,7 @@ impl TransactionMonitorWorker {
                 tx_hash = %record.hash,
                 ledger = ?record.ledger,
                 attempts = attempts + 1,
+                status = next_status,
                 "transaction confirmed on stellar ledger"
             );
 

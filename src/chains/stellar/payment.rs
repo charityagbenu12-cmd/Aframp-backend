@@ -212,6 +212,92 @@ impl CngnPaymentBuilder {
             .submit_transaction_xdr(signed_envelope_xdr)
             .await
     }
+
+    /// Build a multi-operation payment transaction for batching (up to 100 ops).
+    pub async fn build_multi_payment(
+        &self,
+        source: &str,
+        payments: &[(String, String)], // (destination, amount)
+        memo: CngnMemo,
+        fee_stroops: Option<u32>,
+    ) -> StellarResult<CngnPaymentDraft> {
+        if payments.is_empty() {
+            return Err(StellarError::config_error("No payments provided for batch"));
+        }
+        if payments.len() > 100 {
+            return Err(StellarError::config_error("Max 100 operations per transaction"));
+        }
+
+        validate_address(source)?;
+        let source_account = self.stellar_client.get_account(source).await?;
+        let issuer = self.config.issuer_for_network(self.stellar_client.network()).to_string();
+        let asset_code = self.config.asset_code.clone();
+        let asset = build_asset(&asset_code, &issuer)?;
+
+        let mut operations = Vec::new();
+        let mut total_amount_stroops: i64 = 0;
+
+        for (dest, amt) in payments {
+            validate_address(dest)?;
+            let amt_stroops = decimal_to_stroops(amt)?;
+            total_amount_stroops += amt_stroops;
+
+            operations.push(Operation {
+                source_account: None,
+                body: OperationBody::Payment(PaymentOp {
+                    destination: parse_muxed_account(dest)?,
+                    asset: asset.clone(),
+                    amount: amt_stroops,
+                }),
+            });
+        }
+
+        let fee = fee_stroops.unwrap_or(self.base_fee_stroops * operations.len() as u32);
+        let sequence = source_account.sequence + 1;
+        let now = unix_time();
+
+        let tx = Transaction {
+            source_account: parse_muxed_account(source)?,
+            fee,
+            seq_num: SequenceNumber(sequence),
+            cond: Preconditions::Time(TimeBounds {
+                min_time: TimePoint(now),
+                max_time: TimePoint(now + self.timeout.as_secs()),
+            }),
+            memo: memo_to_xdr(&memo)?,
+            operations: VecM::try_from(operations)
+                .map_err(|e| StellarError::serialization_error(e.to_string()))?,
+            ext: TransactionExt::V0,
+        };
+
+        let env = TransactionEnvelope::Tx(TransactionV1Envelope {
+            tx: tx.clone(),
+            signatures: VecM::try_from(Vec::<DecoratedSignature>::new())
+                .map_err(|e| StellarError::serialization_error(e.to_string()))?,
+        });
+
+        let network_id = network_id(self.stellar_client.network().network_passphrase());
+        let tx_hash = tx.hash(network_id)
+            .map_err(|e| StellarError::serialization_error(e.to_string()))?;
+
+        let unsigned_envelope_xdr = env.to_xdr_base64(Limits::none())
+            .map_err(|e| StellarError::serialization_error(e.to_string()))?;
+
+        Ok(CngnPaymentDraft {
+            source: source.to_string(),
+            destination: "batch".to_string(),
+            amount: total_amount_stroops.to_string(), // This is stroops, maybe convert back to decimal if needed
+            asset_code,
+            asset_issuer: issuer,
+            sequence,
+            fee_stroops: fee,
+            timeout_seconds: self.timeout.as_secs(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            transaction_hash: hex::encode(tx_hash),
+            unsigned_envelope_xdr,
+            memo,
+        })
+    }
 }
 
 fn validate_address(address: &str) -> StellarResult<()> {

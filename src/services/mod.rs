@@ -26,6 +26,7 @@ pub mod ip_detection;
 #[cfg(feature = "database")]
 pub mod key_rotation;
 pub mod notification;
+pub mod mint_queue;
 #[cfg(feature = "database")]
 pub mod onramp_quote;
 #[cfg(feature = "database")]
@@ -38,7 +39,7 @@ pub mod transaction;
 pub mod trustline_operation;
 pub mod webhook_processor;
 #[cfg(feature = "database")]
-pub mod transparency;
+pub mod reconciliation;
 
 // Re-export blockchain traits for convenience
 #[cfg(feature = "database")]

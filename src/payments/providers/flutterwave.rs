@@ -514,6 +514,50 @@ impl PaymentProvider for FlutterwaveProvider {
             received_at: chrono::Utc::now().to_rfc3339(),
         })
     }
+
+    async fn get_balance(&self, currency: &str) -> PaymentResult<Money> {
+        let url = format!("{}/{}", self.endpoint("/balances"), currency);
+        let raw: FlutterwaveEnvelope = self
+            .http
+            .request_json(
+                reqwest::Method::GET,
+                &url,
+                Some(&self.config.secret_key),
+                None,
+                &[],
+            )
+            .await?;
+
+        if raw.status.to_lowercase() != "success" {
+            return Err(Self::map_message_error(raw.message));
+        }
+
+        let data = raw.data.ok_or_else(|| PaymentError::ProviderError {
+            provider: "flutterwave".to_string(),
+            message: "missing data in flutterwave balance response".to_string(),
+            provider_code: None,
+            retryable: false,
+        })?;
+
+        let available_balance = data
+            .get("available_balance")
+            .and_then(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| v.as_f64().map(|n| n.to_string()))
+            })
+            .ok_or_else(|| PaymentError::ProviderError {
+                provider: "flutterwave".to_string(),
+                message: "missing balance in flutterwave response".to_string(),
+                provider_code: None,
+                retryable: false,
+            })?;
+
+        Ok(Money {
+            amount: available_balance,
+            currency: currency.to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]

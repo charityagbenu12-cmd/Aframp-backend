@@ -108,6 +108,112 @@ pub mod http {
 }
 
 // ---------------------------------------------------------------------------
+// Service authentication metrics
+// ---------------------------------------------------------------------------
+
+pub mod service_auth {
+    use super::*;
+
+    static SERVICE_TOKEN_ACQUISITIONS: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_TOKEN_REFRESH_EVENTS: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_TOKEN_REFRESH_FAILURES: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_CALL_AUTHENTICATIONS: OnceLock<CounterVec> = OnceLock::new();
+    static SERVICE_CALL_AUTHORIZATION_DENIALS: OnceLock<CounterVec> = OnceLock::new();
+
+    pub fn token_acquisitions() -> &'static CounterVec {
+        SERVICE_TOKEN_ACQUISITIONS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn token_refresh_events() -> &'static CounterVec {
+        SERVICE_TOKEN_REFRESH_EVENTS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn token_refresh_failures() -> &'static CounterVec {
+        SERVICE_TOKEN_REFRESH_FAILURES
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn service_call_authentications() -> &'static CounterVec {
+        SERVICE_CALL_AUTHENTICATIONS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub fn service_call_authorization_denials() -> &'static CounterVec {
+        SERVICE_CALL_AUTHORIZATION_DENIALS
+            .get()
+            .expect("metrics not initialised")
+    }
+
+    pub(super) fn register(r: &Registry) {
+        SERVICE_TOKEN_ACQUISITIONS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_token_acquisitions_total",
+                    "Total service token acquisitions by service",
+                    &["service_name"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_TOKEN_REFRESH_EVENTS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_token_refresh_events_total",
+                    "Total service token refresh events by service",
+                    &["service_name"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_TOKEN_REFRESH_FAILURES
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_token_refresh_failures_total",
+                    "Total service token refresh failures by service",
+                    &["service_name"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_CALL_AUTHENTICATIONS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_call_authentications_total",
+                    "Total service call authentications by calling service, endpoint, and result",
+                    &["calling_service", "endpoint", "result"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        SERVICE_CALL_AUTHORIZATION_DENIALS
+            .set(
+                register_counter_vec_with_registry!(
+                    "aframp_service_call_authorization_denials_total",
+                    "Total service call authorization denials by calling service, endpoint, and reason",
+                    &["calling_service", "endpoint", "reason"],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // cNGN transaction metrics
 // ---------------------------------------------------------------------------
 
@@ -844,6 +950,7 @@ fn register_all(r: &Registry) {
     cache::register(r);
     database::register(r);
     security::register(r);
+    service_auth::register(r);
     ip_detection::register(r);
     alerting::register(r);
     crate::ddos::metrics::register(r);
@@ -852,7 +959,14 @@ fn register_all(r: &Registry) {
     crate::pentest::metrics::register(r);
     crate::masking::metrics::register(r);
     crate::gateway::metrics::register(r);
+
+    backup::register(r);
     #[cfg(feature = "database")]
+
+    crate::analytics::metrics::register(r);
+    crate::adaptive_rate_limit::metrics::register(r);
+    crate::security_compliance::metrics::register(r);
+
 }
 
 // ---------------------------------------------------------------------------
@@ -861,4 +975,75 @@ fn register_all(r: &Registry) {
 
 pub fn key_prefix(key: &str) -> &str {
     key.find(':').map(|i| &key[..i]).unwrap_or(key)
+}
+
+// ---------------------------------------------------------------------------
+// Backup metrics (Issue #119)
+// ---------------------------------------------------------------------------
+
+pub mod backup {
+    use super::*;
+
+    static LAST_SNAPSHOT_TIMESTAMP: OnceLock<GaugeVec> = OnceLock::new();
+    static WAL_ARCHIVING_LAG: OnceLock<GaugeVec> = OnceLock::new();
+    static VERIFICATION_STATUS: OnceLock<GaugeVec> = OnceLock::new();
+
+    /// Record the Unix timestamp of the last successful snapshot.
+    pub fn set_last_snapshot_timestamp(ts: f64) {
+        if let Some(g) = LAST_SNAPSHOT_TIMESTAMP.get() {
+            g.with_label_values(&[]).set(ts);
+        }
+    }
+
+    /// Record the current WAL archiving lag in seconds.
+    pub fn set_wal_lag(seconds: f64) {
+        if let Some(g) = WAL_ARCHIVING_LAG.get() {
+            g.with_label_values(&[]).set(seconds);
+        }
+    }
+
+    /// Record the verification status of the latest snapshot (1 = verified, 0 = failed).
+    pub fn set_verification_status(ok: bool) {
+        if let Some(g) = VERIFICATION_STATUS.get() {
+            g.with_label_values(&[]).set(if ok { 1.0 } else { 0.0 });
+        }
+    }
+
+    pub(super) fn register(r: &Registry) {
+        LAST_SNAPSHOT_TIMESTAMP
+            .set(
+                register_gauge_vec_with_registry!(
+                    "aframp_backup_last_successful_snapshot_timestamp_seconds",
+                    "Unix timestamp of the last successful database snapshot",
+                    &[],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        WAL_ARCHIVING_LAG
+            .set(
+                register_gauge_vec_with_registry!(
+                    "aframp_backup_wal_archiving_lag_seconds",
+                    "Seconds since the last WAL segment was archived",
+                    &[],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+
+        VERIFICATION_STATUS
+            .set(
+                register_gauge_vec_with_registry!(
+                    "aframp_backup_verification_status",
+                    "Latest backup verification result: 1 = verified, 0 = failed",
+                    &[],
+                    r
+                )
+                .unwrap(),
+            )
+            .ok();
+    }
 }
