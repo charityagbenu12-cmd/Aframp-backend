@@ -147,6 +147,10 @@ pub mod service_auth;
 #[cfg(feature = "database")]
 pub mod abuse_detection;
 
+// Compliance Registry — license tracking, regulatory constraints, corridor governance (Issue #2.02)
+#[cfg(feature = "database")]
+pub mod compliance_registry;
+
 // Audit logging system
 #[cfg(feature = "database")]
 pub mod audit;

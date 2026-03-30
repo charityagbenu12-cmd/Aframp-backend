@@ -6,6 +6,7 @@ mod audit;
 mod auth;
 mod cache;
 mod chains;
+mod compliance_registry;
 mod config;
 mod config_validation;
 mod database;
@@ -1826,6 +1827,27 @@ async fn main() -> anyhow::Result<()> {
         .merge(Router::new().nest("/api/admin/security", mtls_admin_routes))
         .merge(transparency_routes)
         .merge(security_compliance_routes)
+        .merge({
+            // ── Compliance Registry routes (Issue #2.02) ─────────────────────
+            if let Some(ref pool) = db_pool {
+                let compliance_state = std::sync::Arc::new(compliance_registry::ComplianceRegistryState {
+                    repo: compliance_registry::ComplianceRegistryRepository::new(pool.clone()),
+                });
+                // Start license expiry notification worker
+                let expiry_pool = pool.clone();
+                tokio::spawn(async move {
+                    compliance_registry::expiry_worker::run_expiry_notification_worker(expiry_pool).await;
+                });
+                info!("✅ Compliance Registry routes enabled");
+                Router::new().nest(
+                    "/api/compliance",
+                    compliance_registry::compliance_registry_router(compliance_state),
+                )
+            } else {
+                info!("⏭️  Skipping Compliance Registry routes (no database)");
+                Router::new()
+            }
+        })
         .with_state(AppState {
             db_pool,
             redis_cache,
