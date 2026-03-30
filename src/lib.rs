@@ -151,6 +151,10 @@ pub mod abuse_detection;
 #[cfg(feature = "database")]
 pub mod compliance_registry;
 
+// Cross-border payment corridor implementations
+#[cfg(feature = "database")]
+pub mod corridors;
+
 // Audit logging system
 #[cfg(feature = "database")]
 pub mod audit;

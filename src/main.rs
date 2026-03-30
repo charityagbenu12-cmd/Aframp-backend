@@ -7,6 +7,7 @@ mod auth;
 mod cache;
 mod chains;
 mod compliance_registry;
+mod corridors;
 mod config;
 mod config_validation;
 mod database;
@@ -1848,7 +1849,78 @@ async fn main() -> anyhow::Result<()> {
                 Router::new()
             }
         })
-        .with_state(AppState {
+        .merge({
+            // ── Nigeria → Kenya Corridor routes (Issue #2.03) ────────────────
+            if let Some(ref pool) = db_pool {
+                use corridors::kenya::{
+                    handlers::KenyaCorridorState,
+                    routes::{kenya_corridor_router, kenya_webhook_router},
+                    service::KenyaCorridorService,
+                    webhook::KenyaWebhookState,
+                };
+                use compliance_registry::ComplianceRegistryRepository;
+                use crate::payments::providers::mpesa_kenya::{MpesaKenyaConfig, MpesaKenyaProvider};
+
+                let corridor_id_str = std::env::var("KENYA_CORRIDOR_ID")
+                    .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000000".to_string());
+                let corridor_id = uuid::Uuid::parse_str(&corridor_id_str)
+                    .unwrap_or_else(|_| uuid::Uuid::nil());
+
+                let compliance_repo = std::sync::Arc::new(
+                    ComplianceRegistryRepository::new(pool.clone()),
+                );
+
+                let fee_svc = std::sync::Arc::new(
+                    crate::services::fee_calculation::FeeCalculationService::new(pool.clone()),
+                );
+
+                if let Ok(mpesa_config) = MpesaKenyaConfig::from_env() {
+                    let rate_repo = crate::database::exchange_rate_repository::ExchangeRateRepository::new(pool.clone());
+                    let exchange_rate_svc = std::sync::Arc::new(
+                        crate::services::exchange_rate::ExchangeRateService::new(
+                            rate_repo,
+                            crate::services::exchange_rate::ExchangeRateServiceConfig::default(),
+                        )
+                        .add_provider(std::sync::Arc::new(
+                            crate::services::rate_providers::FixedRateProvider::new(),
+                        )),
+                    );
+
+                    let kenya_svc = std::sync::Arc::new(KenyaCorridorService::new(
+                        pool.clone(),
+                        compliance_repo,
+                        exchange_rate_svc,
+                        fee_svc,
+                        mpesa_config.clone(),
+                        corridor_id,
+                    ));
+
+                    let corridor_state = std::sync::Arc::new(KenyaCorridorState {
+                        service: kenya_svc,
+                        pool: std::sync::Arc::new(pool.clone()),
+                    });
+
+                    let mpesa_provider = std::sync::Arc::new(
+                        MpesaKenyaProvider::new(mpesa_config)
+                            .expect("M-Pesa Kenya provider init failed"),
+                    );
+                    let webhook_state = std::sync::Arc::new(KenyaWebhookState {
+                        pool: std::sync::Arc::new(pool.clone()),
+                        mpesa_provider,
+                    });
+
+                    info!("✅ Nigeria→Kenya corridor routes enabled");
+                    Router::new()
+                        .nest("/api/corridors/kenya", kenya_corridor_router(corridor_state))
+                        .merge(Router::new().nest("/webhooks", kenya_webhook_router(webhook_state)))
+                } else {
+                    info!("⏭️  Skipping Kenya corridor routes (MPESA_KE_CONSUMER_KEY not set)");
+                    Router::new()
+                }
+            } else {
+                Router::new()
+            }
+        })        .with_state(AppState {
             db_pool,
             redis_cache,
             stellar_client,

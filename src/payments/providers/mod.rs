@@ -7,6 +7,8 @@ pub mod flutterwave;
 #[cfg(feature = "database")]
 pub mod mpesa;
 #[cfg(feature = "database")]
+pub mod mpesa_kenya;
+#[cfg(feature = "database")]
 pub mod paystack;
 
 #[cfg(feature = "database")]
