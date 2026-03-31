@@ -1,6 +1,8 @@
+pub mod burn_transaction_builder;
 pub mod client;
 pub mod config;
 pub mod errors;
+pub mod issuer;
 pub mod payment;
 pub mod service;
 pub mod trustline;

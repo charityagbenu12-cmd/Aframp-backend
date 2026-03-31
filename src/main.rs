@@ -3,6 +3,7 @@ mod api;
 mod api_keys;
 mod analytics;
 mod audit;
+mod auditor_portal;
 mod auth;
 mod cache;
 mod chains;
@@ -16,11 +17,13 @@ mod developer_portal;
 mod error;
 mod health;
 mod logging;
+mod lp_payout;
 mod metrics;
 mod middleware;
 mod mtls;
 mod oauth;
 mod payments;
+mod bug_bounty;
 mod pentest;
 mod recurring;
 mod security_compliance;
@@ -801,6 +804,32 @@ async fn main() -> anyhow::Result<()> {
             info!("✅ Webhook retry worker started");
         }
 
+    // Start Reconciliation Worker
+    let reconciliation_enabled = std::env::var("RECONCILIATION_WORKER_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        != "false";
+    if reconciliation_enabled {
+        if let (Some(pool), Some(client)) = (db_pool.clone(), stellar_client.clone()) {
+            let config = workers::reconciliation_worker::ReconciliationConfig::from_env();
+            info!(
+                interval_mins = config.interval.as_secs() / 60,
+                "Starting reconciliation worker"
+            );
+            let worker = workers::reconciliation_worker::ReconciliationWorker::new(
+                pool,
+                client,
+                config,
+            );
+            tokio::spawn(worker.run(worker_shutdown_rx.clone()));
+            info!("✅ Reconciliation worker started");
+        } else {
+            info!("Skipping reconciliation worker (missing db pool or stellar client)");
+        }
+    } else {
+        info!("Reconciliation worker disabled (RECONCILIATION_WORKER_ENABLED=false)");
+    }
+
         let webhook_state = api::webhooks::WebhookState {
             processor: webhook_processor,
         };
@@ -815,6 +844,35 @@ async fn main() -> anyhow::Result<()> {
 
     // Create the application router with logging middleware
     info!("🛣️  Setting up application routes...");
+
+    // ── LP Payout Engine (Liquidity Provider rewards) ─────────────────────────
+    let lp_payout_routes = if let (Some(pool), Some(client)) =
+        (db_pool.clone(), stellar_client.clone())
+    {
+        let lp_repo = std::sync::Arc::new(lp_payout::LpPayoutRepository::new(pool.clone()));
+        let lp_config = lp_payout::LpPayoutWorkerConfig::from_env();
+
+        let lp_worker_enabled = std::env::var("LP_PAYOUT_WORKER_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .to_lowercase()
+            != "false";
+
+        if lp_worker_enabled {
+            if lp_config.pool_id.is_empty() {
+                warn!("LP_STELLAR_POOL_ID not set — LP payout worker will skip snapshots");
+            }
+            let worker = lp_payout::LpPayoutWorker::new(lp_repo.clone(), client, lp_config);
+            tokio::spawn(worker.run(worker_shutdown_rx.clone()));
+            info!("✅ LP Payout worker started");
+        } else {
+            info!("LP Payout worker disabled (LP_PAYOUT_WORKER_ENABLED=false)");
+        }
+
+        lp_payout::lp_payout_routes(lp_repo)
+    } else {
+        info!("⏭️  Skipping LP payout routes (missing database or stellar client)");
+        Router::new()
+    };
 
     // Setup onramp routes (quote service)
     let onramp_routes = if let (Some(pool), Some(cache), Some(client)) =
@@ -1571,6 +1629,25 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Router::new()
     };
+
+    // ── External Auditor Portal ───────────────────────────────────────────────
+    let auditor_portal_routes = if let Some(ref pool) = db_pool {
+        let audit_repo = std::sync::Arc::new(audit::repository::AuditLogRepository::new(pool.clone()));
+        let auditor_repo = std::sync::Arc::new(auditor_portal::repository::AuditorRepository::new(pool.clone()));
+        let auditor_service = std::sync::Arc::new(auditor_portal::service::AuditorService::new(
+            auditor_repo,
+            audit_repo,
+        ));
+        let state = std::sync::Arc::new(auditor_portal::handlers::AuditorPortalState {
+            service: auditor_service,
+        });
+        info!("🔍 External auditor portal routes enabled");
+        auditor_portal::routes::auditor_routes(state.clone())
+            .merge(auditor_portal::routes::admin_auditor_routes(state))
+    } else {
+        info!("⏭️  Skipping auditor portal routes (no database)");
+        Router::new()
+    };
     let (ddos_state, ddos_admin_routes) = if let Some(ref cache) = redis_cache {
         let ddos_config = ddos::config::DdosConfig::from_env();
         let state = std::sync::Arc::new(ddos::state::DdosState::new(ddos_config, cache.clone()));
@@ -1679,6 +1756,36 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
     };
 
+    // ── Bug Bounty Programme ──────────────────────────────────────────────────
+    let bug_bounty_routes = if let Some(pool) = db_pool.clone() {
+        let repo = std::sync::Arc::new(bug_bounty::BugBountyRepository::new(pool));
+        let config = bug_bounty::BugBountyConfig::default();
+        let registry = prometheus::default_registry();
+        let metrics = std::sync::Arc::new(
+            bug_bounty::metrics::BugBountyMetrics::new(registry).unwrap_or_else(|e| {
+                tracing::warn!("Bug bounty metrics registration failed ({}); using fallback", e);
+                bug_bounty::metrics::BugBountyMetrics::new(&prometheus::Registry::new())
+                    .expect("fallback registry must succeed")
+            }),
+        );
+        let notification_dispatcher = std::sync::Arc::new(
+            bug_bounty::notifications::NotificationDispatcher::new(repo.clone()),
+        );
+        let svc = std::sync::Arc::new(bug_bounty::BugBountyService::new(
+            repo,
+            notification_dispatcher,
+            config.clone(),
+            metrics,
+        ));
+        // Spawn SLA polling worker
+        bug_bounty::SlaPollingWorker::spawn(svc.clone(), &config);
+        info!("🐛 Bug bounty programme routes enabled");
+        bug_bounty::bug_bounty_routes(svc)
+    } else {
+        info!("⏭️  Skipping bug bounty routes (no database)");
+        Router::new()
+    };
+
     // Setup OAuth 2.0 routes
     let oauth_routes = if let (Some(pool), Some(cache)) = (db_pool.clone(), redis_cache.clone()) {
         match oauth::RsaKeyPair::from_env() {
@@ -1747,6 +1854,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(wallet_routes)
         .merge(rates_routes)
         .merge(fees_routes)
+        .merge(mint_routes)
         .merge(webhook_routes)
         .merge(history_routes)
         .merge(auth_routes)
@@ -1815,6 +1923,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(admin_routes)
         .merge(adaptive_rl_admin_routes)
         .merge(audit_routes)
+        .merge(auditor_portal_routes)
         .merge(key_rotation_routes)
         .merge(analytics_routes)
         .merge(openapi_routes)
@@ -1824,125 +1933,12 @@ async fn main() -> anyhow::Result<()> {
         .merge(history_routes)
         .merge(ddos_admin_routes)
         .merge(pentest_routes)
+        .merge(bug_bounty_routes)
         .merge(developer_portal::routes::register_developer_portal_routes(Router::new(), db_pool.clone()))
         .merge(Router::new().nest("/api/admin/security", mtls_admin_routes))
         .merge(transparency_routes)
         .merge(security_compliance_routes)
-        .merge({
-            // ── Compliance Registry routes (Issue #2.02) ─────────────────────
-            if let Some(ref pool) = db_pool {
-                let compliance_state = std::sync::Arc::new(compliance_registry::ComplianceRegistryState {
-                    repo: compliance_registry::ComplianceRegistryRepository::new(pool.clone()),
-                });
-                // Start license expiry notification worker
-                let expiry_pool = pool.clone();
-                tokio::spawn(async move {
-                    compliance_registry::expiry_worker::run_expiry_notification_worker(expiry_pool).await;
-                });
-                info!("✅ Compliance Registry routes enabled");
-                Router::new().nest(
-                    "/api/compliance",
-                    compliance_registry::compliance_registry_router(compliance_state),
-                )
-            } else {
-                info!("⏭️  Skipping Compliance Registry routes (no database)");
-                Router::new()
-            }
-        })
-        .merge({
-            // ── Nigeria → Kenya Corridor routes (Issue #2.03) ────────────────
-            if let Some(ref pool) = db_pool {
-                use corridors::kenya::{
-                    handlers::KenyaCorridorState,
-                    routes::{kenya_corridor_router, kenya_webhook_router},
-                    service::KenyaCorridorService,
-                    webhook::KenyaWebhookState,
-                };
-                use compliance_registry::ComplianceRegistryRepository;
-                use crate::payments::providers::mpesa_kenya::{MpesaKenyaConfig, MpesaKenyaProvider};
-
-                let corridor_id_str = std::env::var("KENYA_CORRIDOR_ID")
-                    .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000000".to_string());
-                let corridor_id = uuid::Uuid::parse_str(&corridor_id_str)
-                    .unwrap_or_else(|_| uuid::Uuid::nil());
-
-                let compliance_repo = std::sync::Arc::new(
-                    ComplianceRegistryRepository::new(pool.clone()),
-                );
-
-                let fee_svc = std::sync::Arc::new(
-                    crate::services::fee_calculation::FeeCalculationService::new(pool.clone()),
-                );
-
-                if let Ok(mpesa_config) = MpesaKenyaConfig::from_env() {
-                    let rate_repo = crate::database::exchange_rate_repository::ExchangeRateRepository::new(pool.clone());
-                    let exchange_rate_svc = std::sync::Arc::new(
-                        crate::services::exchange_rate::ExchangeRateService::new(
-                            rate_repo,
-                            crate::services::exchange_rate::ExchangeRateServiceConfig::default(),
-                        )
-                        .add_provider(std::sync::Arc::new(
-                            crate::services::rate_providers::FixedRateProvider::new(),
-                        )),
-                    );
-
-                    let kenya_svc = std::sync::Arc::new(KenyaCorridorService::new(
-                        pool.clone(),
-                        compliance_repo,
-                        exchange_rate_svc,
-                        fee_svc,
-                        mpesa_config.clone(),
-                        corridor_id,
-                    ));
-
-                    let corridor_state = std::sync::Arc::new(KenyaCorridorState {
-                        service: kenya_svc,
-                        pool: std::sync::Arc::new(pool.clone()),
-                    });
-
-                    let mpesa_provider = std::sync::Arc::new(
-                        MpesaKenyaProvider::new(mpesa_config)
-                            .expect("M-Pesa Kenya provider init failed"),
-                    );
-                    let webhook_state = std::sync::Arc::new(KenyaWebhookState {
-                        pool: std::sync::Arc::new(pool.clone()),
-                        mpesa_provider,
-                    });
-
-                    info!("✅ Nigeria→Kenya corridor routes enabled");
-                    Router::new()
-                        .nest("/api/corridors/kenya", kenya_corridor_router(corridor_state))
-                        .merge(Router::new().nest("/webhooks", kenya_webhook_router(webhook_state)))
-                } else {
-                    info!("⏭️  Skipping Kenya corridor routes (MPESA_KE_CONSUMER_KEY not set)");
-                    Router::new()
-                }
-            } else {
-                Router::new()
-            }
-        })
-        .merge({
-            // ── Corridor Router routes (Issue #2.04) ─────────────────────────
-            if let Some(ref pool) = db_pool {
-                use corridors::router::{
-                    handlers::CorridorRouterState,
-                    repository::CorridorRouterRepository,
-                    routes::{corridor_router_admin, corridor_router_public},
-                    service::CorridorRouterService,
-                };
-
-                let repo = std::sync::Arc::new(CorridorRouterRepository::new(pool.clone()));
-                let svc = std::sync::Arc::new(CorridorRouterService::new(repo));
-                let state = std::sync::Arc::new(CorridorRouterState { service: svc });
-
-                info!("✅ Corridor Router routes enabled");
-                Router::new()
-                    .nest("/api/corridors", corridor_router_public(state.clone()))
-                    .nest("/api/admin/corridors", corridor_router_admin(state))
-            } else {
-                Router::new()
-            }
-        })
+        .merge(lp_payout_routes)
         .with_state(AppState {
             db_pool,
             redis_cache,
@@ -2211,6 +2207,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = offramp_handle {
         if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
             error!(error = %e, "Timed out waiting for offramp worker shutdown");
+        }
+    }
+    if let Some(handle) = mint_expiry_handle {
+        if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            error!(error = %e, "Timed out waiting for mint expiry worker shutdown");
         }
     }
 

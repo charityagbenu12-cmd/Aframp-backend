@@ -384,6 +384,26 @@ impl<T: Serialize + DeserializeOwned + Send + Sync + 'static> Cache<T> for Redis
     }
 }
 
+impl RedisCache {
+    /// Increment a counter and set TTL on first creation (atomic INCR + EXPIRE).
+    /// Used for velocity/smurfing detection windows.
+    pub async fn increment_with_ttl(&self, key: &str, ttl_secs: u64) -> crate::cache::error::CacheResult<i64> {
+        let mut conn = match self.get_connection().await {
+            Ok(c) => c,
+            Err(_) => return Ok(0),
+        };
+        let count: i64 = conn.incr(key, 1i64).await.map_err(|e| {
+            warn!("Redis INCR failed for key '{}': {}", key, e);
+            e
+        })?;
+        // Only set TTL on first increment to preserve the window
+        if count == 1 {
+            let _: () = conn.expire(key, ttl_secs as i64).await.unwrap_or(());
+        }
+        Ok(count)
+    }
+}
+
 /// TTL constants for different data types
 pub mod ttl {
     use std::time::Duration;
