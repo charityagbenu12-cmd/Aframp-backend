@@ -799,6 +799,32 @@ async fn main() -> anyhow::Result<()> {
             info!("✅ Webhook retry worker started");
         }
 
+    // Start Reconciliation Worker
+    let reconciliation_enabled = std::env::var("RECONCILIATION_WORKER_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        != "false";
+    if reconciliation_enabled {
+        if let (Some(pool), Some(client)) = (db_pool.clone(), stellar_client.clone()) {
+            let config = workers::reconciliation_worker::ReconciliationConfig::from_env();
+            info!(
+                interval_mins = config.interval.as_secs() / 60,
+                "Starting reconciliation worker"
+            );
+            let worker = workers::reconciliation_worker::ReconciliationWorker::new(
+                pool,
+                client,
+                config,
+            );
+            tokio::spawn(worker.run(worker_shutdown_rx.clone()));
+            info!("✅ Reconciliation worker started");
+        } else {
+            info!("Skipping reconciliation worker (missing db pool or stellar client)");
+        }
+    } else {
+        info!("Reconciliation worker disabled (RECONCILIATION_WORKER_ENABLED=false)");
+    }
+
         let webhook_state = api::webhooks::WebhookState {
             processor: webhook_processor,
         };
