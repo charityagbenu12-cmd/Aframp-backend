@@ -263,3 +263,8 @@ required-features = ["database"]
 name = "analytics_integration"
 path = "tests/analytics_integration.rs"
 required-features = ["database"]
+
+[[test]]
+name = "bug_bounty_integration"
+path = "tests/bug_bounty_integration.rs"
+required-features = ["database"]
