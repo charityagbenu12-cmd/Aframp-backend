@@ -58,6 +58,10 @@ pub mod admin;
 #[cfg(feature = "database")]
 pub mod analytics;
 
+// LP Payout Engine — reward calculation and disbursement for Liquidity Providers
+#[cfg(feature = "database")]
+pub mod lp_payout;
+
 // Data classification framework — authoritative sensitivity taxonomy and
 // policy enforcement for every data field on the platform.
 #[cfg(feature = "database")]
@@ -115,6 +119,10 @@ pub mod key_management;
 #[cfg(feature = "database")]
 pub mod pentest;
 
+// Bug bounty programme & responsible disclosure
+#[cfg(feature = "database")]
+pub mod bug_bounty;
+
 // Data masking & redaction system
 #[cfg(feature = "database")]
 pub mod masking;
@@ -126,6 +134,10 @@ pub mod gateway;
 // Reserve Vault — NGN collateral management, M-of-N multi-sig, custodian integration
 #[cfg(feature = "database")]
 pub mod vault;
+
+// Treasury Emergency Intervention Framework — one-click peg stabilisation
+#[cfg(feature = "database")]
+pub mod treasury;
 // Consumer usage analytics & reporting system
 #[cfg(feature = "database")]
 pub mod analytics;

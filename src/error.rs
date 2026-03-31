@@ -43,6 +43,10 @@ pub enum ErrorCode {
     InvalidWallet,
     #[serde(rename = "DUPLICATE_TRANSACTION")]
     DuplicateTransaction,
+    #[serde(rename = "RESERVE_INSUFFICIENT")]
+    ReserveInsufficient,
+    #[serde(rename = "MINT_DISABLED")]
+    MintDisabled,
 
     // Infrastructure errors (5xx)
     #[serde(rename = "DATABASE_ERROR")]
@@ -101,6 +105,15 @@ pub enum DomainError {
     InsufficientLiquidity { amount: String },
     /// Access forbidden (e.g., transaction doesn't belong to requesting wallet)
     Forbidden { message: String },
+    /// Fiat reserves are insufficient to back the requested mint amount (CBN/ASC compliance)
+    ReserveInsufficient {
+        total_reserves: String,
+        total_supply: String,
+        mint_amount: String,
+        ratio: String,
+    },
+    /// Minting is disabled by the circuit breaker
+    MintDisabled,
 }
 
 /// Infrastructure-level errors (database, cache, configuration)
@@ -215,6 +228,9 @@ impl AppError {
                 DomainError::DuplicateTransaction { .. } => 409, // Conflict
                 DomainError::TrustlineCreationFailed { .. } => 422,
                 DomainError::InsufficientLiquidity { .. } => 409, // Conflict
+                DomainError::ReserveInsufficient { .. } => 422,
+                DomainError::MintDisabled => 503,
+                _ => 422,
             },
             AppErrorKind::Infrastructure(err) => match err {
                 InfrastructureError::Database { .. } => 500,
@@ -251,6 +267,9 @@ impl AppError {
                 DomainError::TrustlineCreationFailed { .. } => ErrorCode::TrustlineCreationFailed,
                 DomainError::InsufficientLiquidity { .. } => ErrorCode::InsufficientLiquidity,
                 DomainError::AmountTooLow { .. } => ErrorCode::AmountTooLow,
+                DomainError::ReserveInsufficient { .. } => ErrorCode::ReserveInsufficient,
+                DomainError::MintDisabled => ErrorCode::MintDisabled,
+                _ => ErrorCode::InternalError,
             },
             AppErrorKind::Infrastructure(err) => match err {
                 InfrastructureError::Database { .. } => ErrorCode::DatabaseError,
@@ -327,6 +346,16 @@ impl AppError {
                 DomainError::AmountTooLow { .. } => {
                     "Minimum onramp amount is ₦1,000.".to_string()
                 }
+                DomainError::ReserveInsufficient { ratio, .. } => {
+                    format!(
+                        "Mint rejected: fiat reserve ratio ({}) is below the required 1:1 minimum.",
+                        ratio
+                    )
+                }
+                DomainError::MintDisabled => {
+                    "Minting is currently disabled due to a reserve compliance breach. Contact the treasury team.".to_string()
+                }
+                _ => "An unexpected error occurred.".to_string(),
             },
             AppErrorKind::Infrastructure(_) => {
                 "Service temporarily unavailable. Please try again later".to_string()
