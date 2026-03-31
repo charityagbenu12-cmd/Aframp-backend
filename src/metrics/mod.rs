@@ -957,6 +957,7 @@ fn register_all(r: &Registry) {
     issuer::register(r);
     crate::ddos::metrics::register(r);
     crate::crypto::metrics::register(r);
+    crate::admin::mint_signer_metrics::register(r);
     crate::key_management::metrics::register(r);
     crate::pentest::metrics::register(r);
     crate::masking::metrics::register(r);
