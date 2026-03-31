@@ -31,6 +31,8 @@ pub trait PaymentProvider: Send + Sync {
     ) -> PaymentResult<WebhookVerificationResult>;
 
     fn parse_webhook_event(&self, payload: &[u8]) -> PaymentResult<WebhookEvent>;
+
+    async fn get_balance(&self, currency: &str) -> PaymentResult<Money>;
 }
 
 #[cfg(test)]
@@ -126,6 +128,13 @@ mod tests {
                 status: Some(PaymentState::Success),
                 payload: serde_json::json!({}),
                 received_at: chrono::Utc::now().to_rfc3339(),
+            })
+        }
+
+        async fn get_balance(&self, currency: &str) -> PaymentResult<Money> {
+            Ok(Money {
+                amount: "1000000".to_string(),
+                currency: currency.to_string(),
             })
         }
     }

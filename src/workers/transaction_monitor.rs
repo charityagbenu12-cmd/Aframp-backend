@@ -184,6 +184,13 @@ impl TransactionMonitorWorker {
             .inc();
         self.process_pending_transactions().await?;
         self.scan_incoming_transactions().await?;
+
+        // Update last-cycle timestamp for missed-cycle alert rule
+        #[cfg(feature = "cache")]
+        crate::metrics::alerting::worker_last_cycle_timestamp()
+            .with_label_values(&["transaction_monitor"])
+            .set(chrono::Utc::now().timestamp() as f64);
+
         Ok(())
     }
 
@@ -199,6 +206,19 @@ impl TransactionMonitorWorker {
                 self.config.pending_batch_size,
             )
             .await?;
+
+        // Update stale pending transaction gauge for alert rules.
+        // A transaction is "stale" if it has exceeded the configured pending timeout.
+        #[cfg(feature = "cache")]
+        {
+            let stale_count = pending
+                .iter()
+                .filter(|tx| is_timed_out(tx.created_at, self.config.pending_timeout))
+                .count() as f64;
+            crate::metrics::alerting::pending_transactions_stale()
+                .with_label_values(&["all"])
+                .set(stale_count);
+        }
 
         for tx in pending {
             let tx_id = tx.transaction_id.to_string();
@@ -295,8 +315,16 @@ impl TransactionMonitorWorker {
         let tx_repo = TransactionRepository::new(self.pool.clone());
 
         if record.successful {
+            let current_status = tx_repo.find_status_by_id(transaction_id).await.unwrap_or_default();
+            
+            let next_status = match current_status.as_str() {
+                "burning" => "burned",
+                "refunding" => "refunded",
+                _ => "completed",
+            };
+
             tx_repo
-                .update_status_with_metadata(transaction_id, "completed", updated.clone())
+                .update_status_with_metadata(transaction_id, next_status, updated.clone())
                 .await?;
 
             // Also write the confirmed hash to the dedicated column.
@@ -309,6 +337,7 @@ impl TransactionMonitorWorker {
                 tx_hash = %record.hash,
                 ledger = ?record.ledger,
                 attempts = attempts + 1,
+                status = next_status,
                 "transaction confirmed on stellar ledger"
             );
 

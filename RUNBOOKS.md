@@ -1,319 +1,162 @@
-# Runbooks — Aframp Backend
+# Database Runbooks
 
-Step-by-step guides for provisioning and operating the Aframp backend.
-Follow these in order when setting up a new environment.
-
----
-
-## 1. Prerequisites
-
-Install these tools before starting:
-
-```bash
-# Rust toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup default stable
-
-# sqlx-cli (database migrations)
-cargo install sqlx-cli --no-default-features --features postgres
-
-# Docker + Docker Compose
-# https://docs.docker.com/get-docker/
-
-# PostgreSQL client
-# Ubuntu: apt install postgresql-client
-# macOS:  brew install libpq
-
-# Redis client
-# Ubuntu: apt install redis-tools
-# macOS:  brew install redis
-```
+Operational procedures for database backup, restoration, and point-in-time
+recovery. Keep this document up to date whenever the backup strategy changes.
 
 ---
 
-## 2. Local Development Setup
+## Table of Contents
 
-```bash
-# 1. Clone the repository
-git clone https://github.com/Petah1/Aframp-backend.git
-cd Aframp-backend
-
-# 2. Copy environment template
-cp .env.example .env
-# Edit .env — fill in dev credentials (see .env.example comments)
-
-# 3. Start the full local stack
-docker compose up -d
-
-# 4. Verify services are healthy
-docker compose ps
-# All services should show "healthy"
-
-# 5. Run database migrations
-DATABASE_URL="postgres://aframp:aframp_dev@localhost:5432/aframp_dev?sslmode=disable" \
-  sqlx migrate run
-
-# 6. Build and run the application
-cargo run --features database
-
-# 7. Confirm health
-curl http://localhost:8000/health
-```
+1. [Restore from a Daily Snapshot](#1-restore-from-a-daily-snapshot)
+2. [Point-in-Time Recovery (PITR) via WAL Archives](#2-point-in-time-recovery-pitr-via-wal-archives)
+3. [Verify a Restored Database Before Promoting to Production](#3-verify-a-restored-database-before-promoting-to-production)
+4. [Recovery Time Objectives](#4-recovery-time-objectives)
+5. [Restoration Drill Log](#5-restoration-drill-log)
 
 ---
 
-## 3. Staging Environment Setup
+## 1. Restore from a Daily Snapshot
 
-### 3.1 Provision infrastructure
+### Prerequisites
+- AWS CLI configured with credentials that have `s3:GetObject` on the backup
+  bucket.
+- `BACKUP_ENCRYPTION_KEY` available (stored in the team password manager).
+- A target PostgreSQL 16 instance (can be a fresh RDS instance or local
+  Docker container).
 
-Provision:
-- PostgreSQL 15+ instance with SSL enabled
-- Redis 7+ instance with TLS enabled
-- Container runtime (ECS, K8s, or VM with Docker)
-- Load balancer with TLS termination (ALB or nginx)
-
-### 3.2 Store secrets
-
-Store every **[SECRET]** from `PRODUCTION_CONFIG_CHECKLIST.md` in your secrets
-manager. Example using AWS Secrets Manager:
+### Steps
 
 ```bash
-aws secretsmanager create-secret \
-  --name "aframp/staging/DATABASE_URL" \
-  --secret-string "postgres://user:pass@host:5432/aframp_staging?sslmode=require"
+# 1. List available snapshots (most recent last)
+aws s3 ls s3://<BACKUP_BUCKET>/snapshots/ | sort
 
-aws secretsmanager create-secret \
-  --name "aframp/staging/JWT_SECRET" \
-  --secret-string "$(openssl rand -hex 32)"
+# 2. Download the desired snapshot
+SNAPSHOT="snapshot_20260327T020000Z.sql.gz.enc"
+aws s3 cp "s3://<BACKUP_BUCKET>/snapshots/${SNAPSHOT}" /tmp/${SNAPSHOT}
+
+# 3. Decrypt and decompress
+openssl enc -d -aes-256-cbc -pbkdf2 \
+  -pass pass:"${BACKUP_ENCRYPTION_KEY}" \
+  -in /tmp/${SNAPSHOT} \
+  | gunzip > /tmp/restore.sql
+
+# 4. Create a target database
+createdb -h <TARGET_HOST> -U postgres aframp_restore
+
+# 5. Restore
+psql -h <TARGET_HOST> -U postgres aframp_restore < /tmp/restore.sql
+
+# 6. Clean up plaintext dump
+rm -f /tmp/restore.sql /tmp/${SNAPSHOT}
 ```
 
-### 3.3 Configure non-secret variables
-
-Set in your deployment config (ECS task definition / K8s ConfigMap):
-
-```
-APP_ENV=staging
-SERVER_HOST=0.0.0.0
-SERVER_PORT=8000
-STELLAR_NETWORK=testnet
-LOG_LEVEL=INFO
-LOG_FORMAT=json
-ENABLE_TRACING=true
-DB_MAX_CONNECTIONS=30
-CACHE_MAX_CONNECTIONS=15
-ENABLE_MOCK_PAYMENTS=false
-```
-
-### 3.4 Run migrations
-
-```bash
-DATABASE_URL="<staging-url>" sqlx migrate run
-```
-
-### 3.5 Deploy and verify
-
-```bash
-# Build production image
-docker build -t aframp-backend:staging .
-
-# Push to registry
-docker tag aframp-backend:staging <registry>/aframp-backend:staging
-docker push <registry>/aframp-backend:staging
-
-# After deploy, verify health
-curl -f https://staging.aframp.io/health
-```
+### Expected duration
+Approximately **15–30 minutes** for a database up to 50 GB, depending on
+network bandwidth and target instance I/O.
 
 ---
 
-## 4. Production Environment Setup
+## 2. Point-in-Time Recovery (PITR) via WAL Archives
 
-Follow all steps in Section 3, replacing `staging` with `production`, plus:
+Use PITR when you need to recover to a specific timestamp (e.g. just before an
+accidental bulk delete).
 
-### 4.1 Generate production secrets
+### Prerequisites
+- A base snapshot that predates the target recovery timestamp.
+- WAL segments covering the gap between the snapshot and the target timestamp,
+  stored in `s3://<BACKUP_BUCKET>/wal/`.
+- PostgreSQL 16 installed on the recovery host.
 
-```bash
-# JWT secret (minimum 32 chars)
-openssl rand -hex 32
-
-# Encryption key (32 bytes = 64 hex chars)
-openssl rand -hex 32
-```
-
-### 4.2 Database SSL
-
-Ensure `DATABASE_URL` includes `sslmode=verify-full` and the CA certificate
-is available in the container at the path referenced by `PGSSLROOTCERT`.
+### Steps
 
 ```bash
-# Test SSL connection
-psql "postgres://user:pass@host/db?sslmode=verify-full" -c "SELECT 1;"
+# 1. Restore the base snapshot (follow Section 1 steps 1–5 above)
+#    Use the most recent snapshot BEFORE your target recovery timestamp.
+
+# 2. Configure recovery in postgresql.conf
+cat >> /etc/postgresql/16/main/postgresql.conf <<EOF
+restore_command = 'aws s3 cp s3://<BACKUP_BUCKET>/wal/%f %p'
+recovery_target_time = '2026-03-27 14:30:00 UTC'
+recovery_target_action = 'promote'
+EOF
+
+# 3. Create recovery signal file
+touch /var/lib/postgresql/16/main/recovery.signal
+
+# 4. Start PostgreSQL — it will replay WAL up to the target time
+pg_ctlcluster 16 main start
+
+# 5. Monitor recovery progress
+tail -f /var/log/postgresql/postgresql-16-main.log
+
+# 6. Once promoted, verify data (see Section 3)
 ```
 
-### 4.3 Redis TLS
-
-```bash
-# Test TLS connection
-redis-cli -u "rediss://:password@host:6379" ping
-# Expected: PONG
-```
-
-### 4.4 TLS certificate setup (Let's Encrypt)
-
-```bash
-# Install Certbot
-apt install certbot python3-certbot-nginx
-
-# Obtain certificate
-certbot --nginx -d aframp.io -d app.aframp.io
-
-# Verify auto-renewal
-certbot renew --dry-run
-
-# Confirm renewal timer is active
-systemctl status certbot.timer
-```
-
-### 4.5 Configure nginx
-
-```bash
-# Copy nginx config
-cp config/nginx/nginx.conf /etc/nginx/nginx.conf
-
-# Test config
-nginx -t
-
-# Reload
-nginx -s reload
-```
-
-### 4.6 Pre-deploy checklist
-
-Work through every item in `PRODUCTION_CONFIG_CHECKLIST.md` before deploying.
-
-### 4.7 Deploy
-
-```bash
-# Build
-docker build -t aframp-backend:production .
-
-# Run migrations (before starting new containers)
-docker run --rm \
-  -e DATABASE_URL="$DATABASE_URL" \
-  aframp-backend:production \
-  sqlx migrate run
-
-# Start application
-docker run -d \
-  --name aframp-backend \
-  -p 8000:8000 \
-  --env-file /run/secrets/aframp-env \
-  aframp-backend:production
-
-# Verify
-curl -f https://aframp.io/health
-```
+### Expected duration
+Approximately **30–90 minutes** depending on the volume of WAL to replay.
 
 ---
 
-## 5. Running Integration Tests
+## 3. Verify a Restored Database Before Promoting to Production
+
+Run these checks against the restored instance before switching any traffic.
 
 ```bash
-# Start ephemeral test stack
-docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+RESTORE_URL="postgresql://postgres:<password>@<TARGET_HOST>/aframp_restore"
 
-# Wait for services to be healthy
-docker compose ps
+# 3a. Key table row counts
+for TABLE in transactions wallets payment_provider_configs exchange_rate_history; do
+  COUNT=$(psql "$RESTORE_URL" -tAc "SELECT COUNT(*) FROM ${TABLE}")
+  echo "${TABLE}: ${COUNT} rows"
+done
 
-# Run tests
-DATABASE_URL="postgres://aframp:aframp_test@localhost:5432/aframp_test?sslmode=disable" \
-REDIS_URL="redis://localhost:6379" \
-cargo test --features database,integration -- --nocapture
+# 3b. Schema migration count
+psql "$RESTORE_URL" -tAc "SELECT COUNT(*) FROM _sqlx_migrations"
 
-# Tear down
-docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+# 3c. Most recent transaction timestamp (should be close to recovery point)
+psql "$RESTORE_URL" -tAc \
+  "SELECT MAX(created_at) FROM transactions"
+
+# 3d. Spot-check a known transaction
+psql "$RESTORE_URL" -tAc \
+  "SELECT transaction_id, status, created_at FROM transactions ORDER BY created_at DESC LIMIT 5"
+
+# 3e. Confirm no replication slots are blocking WAL retention
+psql "$RESTORE_URL" -tAc \
+  "SELECT slot_name, active FROM pg_replication_slots"
 ```
+
+Only promote the restored instance to production once all checks pass and the
+team lead has signed off.
 
 ---
 
-## 6. Certificate Renewal Monitoring
+## 4. Recovery Time Objectives
 
-Set up an alert to fire when the TLS certificate expires within 30 days:
+| Scenario | RTO estimate | RPO estimate |
+|---|---|---|
+| Restore from daily snapshot | 15–30 min restore + 15 min verification | Up to 24 hours |
+| Point-in-time recovery (WAL) | 30–90 min restore + 15 min verification | Up to 5 minutes (WAL lag threshold) |
 
-```bash
-# Check expiry manually
-echo | openssl s_client -connect aframp.io:443 2>/dev/null \
-  | openssl x509 -noout -dates
-
-# Certbot auto-renewal log
-journalctl -u certbot
-```
-
-Configure your monitoring tool (Datadog, CloudWatch, Grafana) to alert on
-the `ssl_certificate_expiry_days` metric with threshold ≤ 30.
+These estimates assume a 50 GB database and a 1 Gbps network link to the
+backup bucket. Adjust for your actual database size.
 
 ---
 
-## 7. Rollback
+## 5. Restoration Drill Log
 
-```bash
-# Roll back to previous image tag
-docker stop aframp-backend
-docker run -d \
-  --name aframp-backend \
-  -p 8000:8000 \
-  --env-file /run/secrets/aframp-env \
-  aframp-backend:<previous-tag>
+A full restoration drill must be completed before Phase 9 sign-off and
+repeated at least quarterly thereafter.
 
-# If migration rollback is needed
-DATABASE_URL="$DATABASE_URL" sqlx migrate revert
-```
+| Date | Performed by | Snapshot used | Recovery type | Outcome | Notes |
+|---|---|---|---|---|---|
+| _(pending)_ | | | | | Drill to be completed before Phase 9 |
 
----
-
-## 8. Troubleshooting
-
-### Application fails to start
-
-Check logs for configuration validation errors:
-
-```bash
-docker logs aframp-backend 2>&1 | head -50
-```
-
-Common causes:
-- Missing required env var → add it to secrets manager
-- `DATABASE_URL` missing `sslmode=require` in production → update the secret
-- `REDIS_URL` using `redis://` instead of `rediss://` in production → update
-- `JWT_SECRET` shorter than 32 chars → regenerate with `openssl rand -hex 32`
-- `STELLAR_NETWORK=testnet` in production → set to `mainnet`
-
-### Database connection refused
-
-```bash
-# Test connectivity
-psql "$DATABASE_URL" -c "SELECT 1;"
-
-# Check SSL
-psql "$DATABASE_URL" -c "SHOW ssl;"
-```
-
-### Redis connection refused
-
-```bash
-redis-cli -u "$REDIS_URL" ping
-```
-
-### High query latency
-
-```sql
--- Top slow queries
-SELECT round(mean_exec_time::numeric, 2) AS mean_ms,
-       calls, left(query, 100) AS query
-FROM pg_stat_statements
-ORDER BY mean_exec_time DESC
-LIMIT 20;
-
--- Refresh materialised views manually
-SELECT refresh_analytics_views();
-```
+### Drill procedure
+1. Spin up an isolated PostgreSQL instance (e.g. a separate RDS instance or
+   local Docker container — **never** the production instance).
+2. Follow Section 1 (snapshot restore) or Section 2 (PITR) as appropriate.
+3. Run all verification checks from Section 3.
+4. Record the outcome in the table above, including any issues encountered.
+5. Tear down the isolated instance.
+6. Update this document with lessons learned.

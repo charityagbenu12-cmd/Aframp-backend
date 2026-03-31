@@ -398,6 +398,44 @@ impl PaymentProvider for PaystackProvider {
             received_at: chrono::Utc::now().to_rfc3339(),
         })
     }
+
+    async fn get_balance(&self, currency: &str) -> PaymentResult<Money> {
+        let raw: PaystackEnvelope<Vec<PaystackBalanceData>> = self
+            .http
+            .request_json(
+                reqwest::Method::GET,
+                &self.endpoint("/balance"),
+                Some(&self.config.secret_key),
+                None,
+                &[],
+            )
+            .await?;
+
+        if !raw.status {
+            return Err(PaymentError::ProviderError {
+                provider: "paystack".to_string(),
+                message: raw.message,
+                provider_code: None,
+                retryable: false,
+            });
+        }
+
+        let balance = raw
+            .data
+            .iter()
+            .find(|b| b.currency == currency)
+            .ok_or_else(|| PaymentError::ProviderError {
+                provider: "paystack".to_string(),
+                message: format!("balance for {} not found in paystack response", currency),
+                provider_code: None,
+                retryable: false,
+            })?;
+
+        Ok(Money {
+            amount: balance.balance.to_string(),
+            currency: currency.to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,6 +476,12 @@ struct PaystackTransferData {
     status: String,
     #[serde(default)]
     failure_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaystackBalanceData {
+    currency: String,
+    balance: u64,
 }
 
 #[cfg(test)]

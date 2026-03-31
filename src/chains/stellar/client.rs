@@ -518,6 +518,84 @@ impl StellarClient {
             .cloned()
             .unwrap_or_default())
     }
+
+    /// Retrieves statistics for a specific asset, such as total supply, number of accounts, etc.
+    pub async fn get_asset_stats(&self, asset_code: &str, asset_issuer: &str) -> StellarResult<JsonValue> {
+        let url = format!(
+            "{}/assets?asset_code={}&asset_issuer={}",
+            self.config.horizon_url(),
+            asset_code,
+            asset_issuer
+        );
+
+        let response = timeout(
+            self.config.request_timeout,
+            self.http_client.get(&url).send(),
+        )
+        .await
+        .map_err(|_| StellarError::timeout_error(self.config.request_timeout.as_secs()))?
+        .map_err(|e| StellarError::network_error(format!("Horizon assets query error: {}", e)))?
+        .error_for_status()
+        .map_err(|e| StellarError::network_error(format!("Horizon assets query failed: {}", e)))?;
+
+        let body = response
+            .json::<JsonValue>()
+            .await
+            .map_err(|e| StellarError::serialization_error(format!("JSON parsing error: {}", e)))?;
+
+        let records = body
+            .get("_embedded")
+            .and_then(|v| v.get("records"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| StellarError::network_error("Missing records in asset stats response".to_string()))?;
+
+        if records.is_empty() {
+            return Err(StellarError::network_error(format!(
+                "Asset {}:{} not found",
+                asset_code, asset_issuer
+            )));
+        }
+
+        Ok(records[0].clone())
+    }
+
+    /// Lists accounts that hold a specific asset.
+    pub async fn list_asset_holders(
+        &self,
+        asset_code: &str,
+        asset_issuer: &str,
+        limit: usize,
+    ) -> StellarResult<Vec<JsonValue>> {
+        let url = format!(
+            "{}/accounts?asset={}:{}&limit={}&order=desc&sort=balance",
+            self.config.horizon_url(),
+            asset_code,
+            asset_issuer,
+            limit.min(200)
+        );
+
+        let response = timeout(
+            self.config.request_timeout,
+            self.http_client.get(&url).send(),
+        )
+        .await
+        .map_err(|_| StellarError::timeout_error(self.config.request_timeout.as_secs()))?
+        .map_err(|e| StellarError::network_error(format!("Horizon asset holders error: {}", e)))?
+        .error_for_status()
+        .map_err(|e| StellarError::network_error(format!("Horizon asset holders failed: {}", e)))?;
+
+        let body = response
+            .json::<JsonValue>()
+            .await
+            .map_err(|e| StellarError::serialization_error(format!("JSON parsing error: {}", e)))?;
+
+        Ok(body
+            .get("_embedded")
+            .and_then(|v| v.get("records"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
 }
 
 fn encode_form_component(input: &str) -> String {

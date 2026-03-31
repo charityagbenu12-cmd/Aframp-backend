@@ -218,34 +218,20 @@ pub fn extract_client_ip(request: &Request) -> Option<String> {
     None
 }
 
-/// Middleware for tracking database query performance
-///
-/// Use this to wrap database operations and log slow queries
-///
-/// # Example
-/// ```no_run
-/// # #[cfg(feature = "database")]
-/// # {
-/// use aframp::middleware::logging::log_database_query;
-///
-/// # async fn example() {
-/// log_database_query("SELECT * FROM wallets WHERE id = $1", async {
-///     // Database operation here
-///     Ok::<_, ()>(())
-/// }).await;
-/// # }
-/// # }
-/// ```
+/// Middleware for tracking database query performance.
+/// Redacts sensitive parameter values before any query logging.
 #[cfg(feature = "database")]
 pub async fn log_database_query<F, T, E>(query: &str, operation: F) -> Result<T, E>
 where
     F: std::future::Future<Output = Result<T, E>>,
 {
     let start = Instant::now();
+    // Redact any sensitive patterns from the query string before logging.
+    let safe_query = crate::masking::patterns::scan_and_redact(query).0;
 
     tracing::debug!(
         event_type = "database_query_start",
-        query = %query,
+        query = %safe_query,
         "Executing database query"
     );
 
@@ -258,14 +244,14 @@ where
             if duration_ms > 100 {
                 warn!(
                     event_type = "slow_database_query",
-                    query = %query,
+                    query = %safe_query,
                     duration_ms = %duration_ms,
                     "Slow database query detected"
                 );
             } else {
                 tracing::debug!(
                     event_type = "database_query_complete",
-                    query = %query,
+                    query = %safe_query,
                     duration_ms = %duration_ms,
                     "Database query completed"
                 );
@@ -274,7 +260,7 @@ where
         Err(_) => {
             tracing::error!(
                 event_type = "database_query_error",
-                query = %query,
+                query = %safe_query,
                 duration_ms = %duration_ms,
                 "Database query failed"
             );

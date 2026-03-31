@@ -38,9 +38,6 @@ pub mod cache;
 #[cfg(feature = "database")]
 pub mod services;
 
-#[cfg(feature = "database")]
-pub mod recurring;
-
 // Payment providers
 #[cfg(feature = "database")]
 pub mod payments;
@@ -56,6 +53,19 @@ pub mod config;
 // Admin access control system
 #[cfg(feature = "database")]
 pub mod admin;
+
+// Analytics dashboard data endpoints (Issue #113)
+#[cfg(feature = "database")]
+pub mod analytics;
+
+// LP Payout Engine — reward calculation and disbursement for Liquidity Providers
+#[cfg(feature = "database")]
+pub mod lp_payout;
+
+// Data classification framework — authoritative sensitivity taxonomy and
+// policy enforcement for every data field on the platform.
+#[cfg(feature = "database")]
+pub mod data_classification;
 
 // API handlers (exposed for integration tests)
 #[cfg(feature = "database")]
@@ -92,6 +102,70 @@ pub mod metrics;
 // DDoS protection and traffic shaping
 #[cfg(feature = "cache")]
 pub mod ddos;
+
+// Microservice-to-microservice authentication
+#[cfg(feature = "database")]
+pub mod service_auth;
+
+// End-to-end payload encryption (Issue — Data Security & Encryption)
+#[cfg(feature = "database")]
+pub mod crypto;
+
+// Platform key management framework (Issue — Key Management & Rotation)
+#[cfg(feature = "database")]
+pub mod key_management;
+
+// Penetration testing & security review framework
+#[cfg(feature = "database")]
+pub mod pentest;
+
+// Bug bounty programme & responsible disclosure
+#[cfg(feature = "database")]
+pub mod bug_bounty;
+
+// Data masking & redaction system
+#[cfg(feature = "database")]
+pub mod masking;
+
+// API gateway security policy enforcement
+#[cfg(feature = "database")]
+pub mod gateway;
+
+// Reserve Vault — NGN collateral management, M-of-N multi-sig, custodian integration
+#[cfg(feature = "database")]
+pub mod vault;
+
+// Treasury Emergency Intervention Framework — one-click peg stabilisation
+#[cfg(feature = "database")]
+pub mod treasury;
+// Consumer usage analytics & reporting system
+#[cfg(feature = "database")]
+pub mod analytics;
+// Adaptive rate limiting and throttling system
+#[cfg(feature = "cache")]
+pub mod adaptive_rate_limit;
+// mTLS certificate lifecycle management
+#[cfg(feature = "database")]
+pub mod mtls;
+
+// Comprehensive audit logging system
+#[cfg(feature = "database")]
+pub mod audit;
+// Microservice-to-microservice authentication
+#[cfg(feature = "database")]
+pub mod service_auth;
+
+// Abuse detection and automated response system
+#[cfg(feature = "database")]
+pub mod abuse_detection;
+
+// Compliance Registry — license tracking, regulatory constraints, corridor governance (Issue #2.02)
+#[cfg(feature = "database")]
+pub mod compliance_registry;
+
+// Audit logging system
+#[cfg(feature = "database")]
+pub mod audit;
 
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
