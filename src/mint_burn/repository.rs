@@ -39,7 +39,8 @@ impl MintBurnRepository {
     // -----------------------------------------------------------------------
 
     /// Return `true` if the given transaction hash already exists in
-    /// `processed_events`.
+    /// `processed_events`. Used as a fast pre-check; the definitive
+    /// duplicate guard is the ON CONFLICT inside `commit_event`.
     pub async fn is_duplicate(&self, tx_hash: &str) -> Result<bool, MintBurnError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM processed_events WHERE transaction_hash = $1",
@@ -56,14 +57,11 @@ impl MintBurnRepository {
     // -----------------------------------------------------------------------
 
     /// Atomically:
-    /// 1. Insert a row into `processed_events`.
+    /// 1. Insert a row into `processed_events` (ON CONFLICT DO NOTHING for
+    ///    idempotency — returns Ok(()) if already present).
     /// 2. Upsert the `ledger_cursor` singleton row.
     /// 3. Call `confirm_mint` or `confirm_redemption` based on
     ///    `event.operation_type` and `event.parsed_id`.
-    ///
-    /// Returns `Ok(())` even when the corresponding Mint/Redemption record is
-    /// not found — the caller is responsible for routing unmatched events to
-    /// `insert_unmatched` before calling this function.
     pub async fn commit_event(
         &self,
         event: &ProcessedEvent,
@@ -71,8 +69,10 @@ impl MintBurnRepository {
     ) -> Result<(), MintBurnError> {
         let mut tx = self.pool.begin().await?;
 
-        // 1. Insert into processed_events
-        sqlx::query(
+        // 1. Insert into processed_events — ON CONFLICT is the definitive
+        //    idempotency guard, eliminating the TOCTOU race between
+        //    is_duplicate() and the insert.
+        let inserted = sqlx::query(
             r#"
             INSERT INTO processed_events (
                 id, transaction_hash, operation_type, ledger_id,
@@ -87,6 +87,7 @@ impl MintBurnRepository {
                 $10, $11,
                 $12, $13
             )
+            ON CONFLICT (transaction_hash) DO NOTHING
             "#,
         )
         .bind(event.id)
@@ -105,12 +106,18 @@ impl MintBurnRepository {
         .execute(&mut *tx)
         .await?;
 
-        // 2. Upsert ledger_cursor singleton (UPDATE the single row)
+        // Already committed by a concurrent worker — skip cursor + confirmation.
+        if inserted.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(());
+        }
+
+        // 2. Upsert ledger_cursor — INSERT on first run, UPDATE thereafter.
         sqlx::query(
             r#"
-            UPDATE ledger_cursor
-            SET cursor = $1, updated_at = NOW()
-            WHERE id = (SELECT id FROM ledger_cursor ORDER BY id LIMIT 1)
+            INSERT INTO ledger_cursor (cursor, updated_at)
+            VALUES ($1, NOW())
+            ON CONFLICT (id) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = NOW()
             "#,
         )
         .bind(cursor)

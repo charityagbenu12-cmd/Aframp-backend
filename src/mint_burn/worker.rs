@@ -175,12 +175,11 @@ impl MintBurnWorker {
             "Classified operation"
         );
 
-        // 5. Idempotency check (Requirement 3.1, 3.2)
+        // 5. Idempotency check (fast pre-filter — definitive guard is ON CONFLICT in commit_event)
         if repo.is_duplicate(&op.transaction_hash).await? {
             tracing::info!(
                 transaction_hash = %op.transaction_hash,
-                detected_at = %Utc::now(),
-                "Duplicate operation skipped (Requirement 3.2)"
+                "Duplicate operation skipped (pre-check)"
             );
             self.metrics.duplicates_skipped_total.inc();
             return Ok(());
@@ -470,6 +469,20 @@ impl MintBurnWorker {
                             line_buf.drain(..=newline_pos);
 
                             // SSE line parser: extract data: payloads
+                            if line.starts_with("event: hello") || line == "event:hello" {
+                                // Horizon sends "event: hello" when the stream
+                                // reaches the live ledger position — this is the
+                                // correct catch-up completion signal.
+                                if !catch_up_logged {
+                                    tracing::info!(
+                                        replayed_ops = replayed_ops,
+                                        "Catch-up complete; stream is now live"
+                                    );
+                                    catch_up_logged = true;
+                                }
+                                continue;
+                            }
+
                             if let Some(payload) = line.strip_prefix("data: ") {
                                 let payload = payload.trim();
                                 if payload.is_empty() {
@@ -487,22 +500,6 @@ impl MintBurnWorker {
                                             "process_event error; continuing (Requirement 9.4)"
                                         );
                                     }
-                                }
-
-                                // Emit catch-up complete log when stream reaches live position
-                                // (Requirement 5.4): detect by checking if we've replayed ops
-                                // and the cursor is now "now" (live position).
-                                if !catch_up_logged && replayed_ops > 0 && cursor != "now" {
-                                    // We've been replaying from a stored cursor and are still
-                                    // receiving events — once we get a "hello" or the stream
-                                    // slows to live rate we consider catch-up done.
-                                    // A simple heuristic: log after first successful event
-                                    // when starting from a non-"now" cursor.
-                                    tracing::info!(
-                                        replayed_ops = replayed_ops,
-                                        "Catch-up complete; stream is now live (Requirement 5.4)"
-                                    );
-                                    catch_up_logged = true;
                                 }
                             }
                             // Skip: "event:", "retry:", empty lines (heartbeat pings)

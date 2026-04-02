@@ -91,8 +91,12 @@ impl RewardEngine {
                 continue;
             }
 
-            let avg_volume = snapshots.iter().map(|s| s.volume_stroops).sum::<i64>()
-                / snapshots.len() as i64;
+            let avg_volume = if snapshots.is_empty() {
+                0.0f64
+            } else {
+                snapshots.iter().map(|s| s.volume_stroops as f64).sum::<f64>()
+                    / snapshots.len() as f64
+            };
 
             // ── Fee-based reward ──────────────────────────────────────────────
             let fee_reward = self.calc_fee_reward(&snapshots, total_fees_stroops, avg_volume);
@@ -103,10 +107,10 @@ impl RewardEngine {
             for (reward_type, reward_stroops) in
                 [("fee_based", fee_reward), ("liquidity_mining", mining_reward)]
             {
-                let wash_excluded = reward_stroops == 0
-                    && snapshots
-                        .iter()
-                        .all(|s| is_wash_trade(s, avg_volume));
+                // wash_excluded: true only when ALL snapshots are wash trades
+                // (reward is zero because of wash trading, not for other reasons).
+                let all_wash = snapshots.iter().all(|s| is_wash_trade(s, avg_volume));
+                let wash_excluded = all_wash;
 
                 let compliance_flagged = reward_stroops > compliance_threshold;
                 let compliance_reason = if compliance_flagged {
@@ -157,7 +161,7 @@ impl RewardEngine {
         &self,
         snapshots: &[LpPoolSnapshot],
         total_fees_stroops: i64,
-        avg_volume: i64,
+        avg_volume: f64,
     ) -> i64 {
         if total_fees_stroops == 0 || snapshots.is_empty() {
             return 0;
@@ -190,7 +194,7 @@ impl RewardEngine {
         &self,
         snapshots: &[LpPoolSnapshot],
         rate_per_1000: f64,
-        avg_volume: i64,
+        avg_volume: f64,
     ) -> i64 {
         // Sum: (lp_balance_stroops / 1000) * rate_per_1000 for each valid hourly snapshot
         snapshots
@@ -204,9 +208,9 @@ impl RewardEngine {
     }
 }
 
-fn is_wash_trade(snapshot: &LpPoolSnapshot, avg_volume: i64) -> bool {
-    avg_volume > 0
-        && snapshot.volume_stroops as f64 > avg_volume as f64 * WASH_TRADE_VOLUME_MULTIPLIER
+fn is_wash_trade(snapshot: &LpPoolSnapshot, avg_volume: f64) -> bool {
+    avg_volume > 0.0
+        && snapshot.volume_stroops as f64 > avg_volume * WASH_TRADE_VOLUME_MULTIPLIER
 }
 
 // ── Epoch boundary helpers ────────────────────────────────────────────────────

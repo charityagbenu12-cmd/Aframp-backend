@@ -33,9 +33,17 @@ pub fn parse_memo(memo: Option<&str>) -> ParsedMemo {
         Some(s) if s.is_empty() => ParsedMemo::Missing,
         Some(s) => {
             if let Some(id) = s.strip_prefix("mint_id:") {
-                ParsedMemo::MintId(id.to_owned())
+                if uuid::Uuid::parse_str(id).is_ok() {
+                    ParsedMemo::MintId(id.to_owned())
+                } else {
+                    ParsedMemo::Unparseable(s.to_owned())
+                }
             } else if let Some(id) = s.strip_prefix("redemption_id:") {
-                ParsedMemo::RedemptionId(id.to_owned())
+                if uuid::Uuid::parse_str(id).is_ok() {
+                    ParsedMemo::RedemptionId(id.to_owned())
+                } else {
+                    ParsedMemo::Unparseable(s.to_owned())
+                }
             } else {
                 ParsedMemo::Unparseable(s.to_owned())
             }
