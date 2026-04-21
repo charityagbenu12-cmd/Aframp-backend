@@ -414,56 +414,63 @@ impl AppError {
     /// Get user-friendly error message
     pub fn user_message(&self) -> String {
         match &self.kind {
-            AppErrorKind::Domain(err) =>
-                match err {
-                    DomainError::InsufficientBalance { available, required } => {
-                        format!(
-                            "Insufficient CNGN balance. Available: {}, Required: {}",
-                            available,
-                            required
-                        )
-                    }
-                    DomainError::TrustlineNotFound { wallet_address, asset } => {
-                        format!(
-                            "Please add {} trustline to your wallet ({}...)",
-                            asset,
-                            &wallet_address[..6]
-                        )
-                    }
-                    DomainError::InvalidAmount { amount, reason } => {
-                        format!("Invalid amount '{}': {}", amount, reason)
-                    }
-                    DomainError::TransactionNotFound { transaction_id } => {
-                        format!("Transaction '{}' not found", transaction_id)
-                    }
-                    DomainError::WalletNotFound { wallet_address } => {
-                        format!("Wallet '{}...' not found", &wallet_address[..6])
-                    }
-                    DomainError::RateExpired { quote_id } => {
-                        format!("Exchange rate quote '{}' has expired. Please request a new quote", quote_id)
-                    }
-                    DomainError::DuplicateTransaction { transaction_id } => {
-                        format!("Transaction '{}' already exists", transaction_id)
-                    }
-                    DomainError::TrustlineCreationFailed { wallet_address, reason } => {
-                        format!(
-                            "Failed to create trustline for wallet '{}...': {}",
-                            &wallet_address[..6],
-                            reason
-                        )
-                    }
-                    DomainError::InsufficientLiquidity { .. } => {
-                        "cNGN liquidity unavailable for this amount. Try a smaller amount or check back later.".to_string()
-                    }
-                    DomainError::AmountTooLow { .. } => {
-                        "Minimum onramp amount is ₦1,000.".to_string()
-                    }
-                    DomainError::Forbidden { message } => {
-                        format!("Access forbidden: {}", message)
-                    }
-                    DomainError::SystemHalted { status } => {
-                        format!("System halted due to security incident. Status: {}. Please contact support.", status)
-                    }
+            AppErrorKind::Domain(err) => match err {
+                DomainError::InsufficientBalance { available, required } => {
+                    format!(
+                        "Insufficient CNGN balance. Available: {}, Required: {}",
+                        available, required
+                    )
+                }
+                DomainError::TrustlineNotFound {
+                    wallet_address,
+                    asset,
+                } => {
+                    format!(
+                        "Please add {} trustline to your wallet ({}...)",
+                        asset,
+                        &wallet_address[..6]
+                    )
+                }
+                DomainError::InvalidAmount { amount, reason } => {
+                    format!("Invalid amount '{}': {}", amount, reason)
+                }
+                DomainError::TransactionNotFound { transaction_id } => {
+                    format!("Transaction '{}' not found", transaction_id)
+                }
+                DomainError::WalletNotFound { wallet_address } => {
+                    format!("Wallet '{}...' not found", &wallet_address[..6])
+                }
+                DomainError::RateExpired { quote_id } => {
+                    format!(
+                        "Exchange rate quote '{}' has expired. Please request a new quote",
+                        quote_id
+                    )
+                }
+                DomainError::DuplicateTransaction { transaction_id } => {
+                    format!("Transaction '{}' already exists", transaction_id)
+                }
+                DomainError::TrustlineCreationFailed {
+                    wallet_address,
+                    reason,
+                } => {
+                    format!(
+                        "Failed to create trustline for wallet '{}...': {}",
+                        &wallet_address[..6],
+                        reason
+                    )
+                }
+                DomainError::InsufficientLiquidity { .. } => {
+                    "cNGN liquidity unavailable for this amount. Try a smaller amount or check back later.".to_string()
+                }
+                DomainError::AmountTooLow { .. } => "Minimum onramp amount is ₦1,000.".to_string(),
+                DomainError::Forbidden { message } => {
+                    format!("Access forbidden: {}", message)
+                }
+                DomainError::SystemHalted { status } => {
+                    format!(
+                        "System halted due to security incident. Status: {}. Please contact support.",
+                        status
+                    )
                 }
                 DomainError::ReserveInsufficient { ratio, .. } => {
                     format!(

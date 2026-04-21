@@ -151,15 +151,26 @@ async fn resolve_api_key_full(pool: &PgPool, raw_key: &str) -> LookupResult {
             if let Some(exp) = r.expires_at {
                 if exp < now {
                     let grace_end = exp + chrono::Duration::hours(24);
+                    if now < grace_end {
+                        return LookupResult::GracePeriod {
+                            auth: AuthenticatedKey {
+                                key_id: r.key_id,
+                                consumer_id: r.consumer_id,
+                                consumer_type: r.consumer_type,
+                                scopes: r.scopes.unwrap_or_default(),
+                                environment: String::new(),
+                                grace_period_warning: Some(format!(
+                                    "This API key has been rotated. Please migrate to the new key before {}",
+                                    grace_end.format("%Y-%m-%dT%H:%M:%SZ")
+                                )),
+                            },
+                            grace_end,
+                        };
+                    }
                     return LookupResult::Expired {
-                        auth: AuthenticatedKey {
-                            key_id: r.key_id,
-                            consumer_id: r.consumer_id,
-                            consumer_type: r.consumer_type,
-                            scopes: r.scopes.unwrap_or_default(),
-                            environment: String::new(),
-                        },
-                        grace_end,
+                        key_id: r.key_id,
+                        consumer_id: r.consumer_id,
+                        expires_at: exp,
                     };
                 }
             }
@@ -169,6 +180,7 @@ async fn resolve_api_key_full(pool: &PgPool, raw_key: &str) -> LookupResult {
                 consumer_type: r.consumer_type,
                 scopes: r.scopes.unwrap_or_default(),
                 environment: String::new(),
+                grace_period_warning: None,
             })
         }
     }
@@ -187,161 +199,6 @@ fn extract_raw_key(headers: &HeaderMap) -> Option<String> {
         return Some(bearer.to_string());
     }
     // Fall back to X-API-Key
-    headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-}
-
-// ─── Key Resolution ───────────────────────────────────────────────────────────
-
-/// Resolve a raw API key against the database using Argon2id verification.
-///
-/// Returns `None` if the key is invalid, expired, revoked, or environment-mismatched.
-/// Never reveals which specific check failed to the caller.
-pub async fn resolve_api_key(
-    pool: &PgPool,
-    raw_key: &str,
-    expected_environment: &str,
-) -> Option<AuthenticatedKey> {
-    if raw_key.len() < 8 {
-        return None;
-    }
-
-    // Derive prefix for fast index lookup (first 8 chars of the full key)
-    let key_prefix: String = raw_key.chars().take(8).collect();
-
-    let repo = ApiKeyRepository::new(pool.clone());
-
-    // Fetch candidates by prefix + environment (uses idx_api_keys_prefix_status)
-    let candidates = repo
-        .find_active_by_prefix(&key_prefix, expected_environment)
-        .await
-        .ok()?;
-
-    // Argon2id verify against each candidate (usually just one)
-    let matched = candidates
-        .into_iter()
-        .find(|k| verify_api_key(raw_key, &k.key_hash))?;
-
-    // Environment double-check (belt-and-suspenders — already filtered in query)
-    if matched.environment != expected_environment {
-        warn!(
-            key_id = %matched.id,
-            key_env = %matched.environment,
-            expected_env = %expected_environment,
-            "Environment mismatch on API key"
-        );
-        return None;
-    }
-
-    // Fetch granted scopes
-    let scopes: Vec<String> = sqlx::query_scalar!(
-        "SELECT scope_name FROM key_scopes WHERE api_key_id = $1 ORDER BY scope_name",
-        matched.id
-    )
-    .fetch_all(pool)
-    .await
-    .ok()
-    .unwrap_or_default();
-
-    // Fetch consumer type
-    let consumer_type: String = sqlx::query_scalar!(
-        "SELECT consumer_type FROM consumers WHERE id = $1",
-        matched.consumer_id
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_default();
-
-    // Update last_used_at asynchronously — does not block the request
-    let row = match row {
-        Ok(Some(r)) => r,
-        Ok(None) => return LookupResult::NotFound,
-        Err(e) => {
-            warn!(error = %e, "DB error during API key lookup");
-            return LookupResult::NotFound;
-        }
-    };
-
-    let now = Utc::now();
-
-    // Check expiry.
-    if let Some(expires_at) = row.expires_at {
-        if expires_at <= now {
-            let grace_end = crate::services::key_rotation::check_grace_period(pool, row.key_id).await;
-            if let Some(grace_end) = grace_end {
-                let auth = AuthenticatedKey {
-                    key_id: row.key_id,
-                    consumer_id: row.consumer_id,
-                    consumer_type: row.consumer_type,
-                    environment: String::new(),
-                    scopes: row.scopes.unwrap_or_default(),
-                    grace_period_warning: Some(format!(
-                        "This API key has been rotated. Please migrate to the new key before {}",
-                        grace_end.format("%Y-%m-%dT%H:%M:%SZ")
-                    )),
-                };
-                return LookupResult::GracePeriod { auth, grace_end };
-            }
-            return LookupResult::Expired {
-                key_id: row.key_id,
-                consumer_id: row.consumer_id,
-                expires_at,
-            };
-        }
-    }
-
-    // Check is_active.
-    if !row.is_active {
-        return LookupResult::Expired {
-            key_id: row.key_id,
-            consumer_id: row.consumer_id,
-            expires_at: row.expires_at.unwrap_or(now),
-        };
-    }
-
-    // Valid key — update last_used_at asynchronously.
-    let pool_clone = pool.clone();
-    let key_id = row.key_id;
-    tokio::spawn(async move {
-        let _ = sqlx::query!(
-            "UPDATE api_keys SET last_used_at = now() WHERE id = $1",
-            key_id
-        )
-        .execute(&pool_clone)
-        .await;
-    });
-
-    Some(AuthenticatedKey {
-        key_id: matched.id,
-        consumer_id: matched.consumer_id,
-        consumer_type,
-        environment: matched.environment,
-        scopes,
-    LookupResult::Valid(AuthenticatedKey {
-        key_id: row.key_id,
-        consumer_id: row.consumer_id,
-        consumer_type: row.consumer_type,
-        environment: String::new(),
-        scopes: row.scopes.unwrap_or_default(),
-        grace_period_warning: None,
-    })
-}
-
-// ─── Key Extraction ───────────────────────────────────────────────────────────
-
-/// Extract the raw API key from `Authorization: Bearer <key>` or `X-API-Key: <key>`.
-fn extract_raw_key(headers: &HeaderMap) -> Option<String> {
-    if let Some(bearer) = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-    {
-        return Some(bearer.to_string());
-    }
     headers
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
