@@ -185,6 +185,10 @@ pub mod corridors;
 #[cfg(feature = "database")]
 pub mod pos;
 
+// Merchant Gateway — Commercial adoption entry point for businesses
+#[cfg(feature = "database")]
+pub mod merchant_gateway;
+
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
 #[contracterror]
