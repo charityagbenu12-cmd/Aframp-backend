@@ -177,6 +177,11 @@ pub mod security;
 #[cfg(feature = "database")]
 pub mod compliance_registry;
 
+// LP Onboarding & Partner Portal — institutional liquidity provider onboarding,
+// agreement lifecycle, Stellar key allowlisting
+#[cfg(feature = "database")]
+pub mod lp_onboarding;
+
 // Cross-border payment corridor implementations
 #[cfg(feature = "database")]
 pub mod corridors;

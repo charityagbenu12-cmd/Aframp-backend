@@ -19,6 +19,7 @@ mod error;
 mod health;
 mod liquidity;
 mod logging;
+mod lp_onboarding;
 mod lp_payout;
 mod metrics;
 mod multisig;
@@ -879,6 +880,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Create the application router with logging middleware
     info!("🛣️  Setting up application routes...");
+
+    // ── LP Onboarding & Partner Portal ────────────────────────────────────────
+    let lp_onboarding_routes = if let Some(pool) = db_pool.clone() {
+        let repo = std::sync::Arc::new(lp_onboarding::LpOnboardingRepository::new(pool.clone()));
+        let svc = std::sync::Arc::new(lp_onboarding::LpOnboardingService::new(
+            repo.clone(),
+            std::env::var("DOCUSIGN_BASE_URL")
+                .unwrap_or_else(|_| "https://demo.docusign.net/restapi".into()),
+            std::env::var("DOCUSIGN_ACCOUNT_ID").unwrap_or_default(),
+            std::env::var("DOCUSIGN_ACCESS_TOKEN").unwrap_or_default(),
+        ));
+        let expiry_worker = lp_onboarding::AgreementExpiryWorker::new(repo);
+        tokio::spawn(expiry_worker.run());
+        info!("✅ LP Onboarding service started");
+        lp_onboarding::routes::partner_routes(svc.clone())
+            .merge(lp_onboarding::routes::admin_routes(svc.clone()))
+            .merge(lp_onboarding::routes::webhook_routes(svc))
+    } else {
+        info!("⏭️  Skipping LP onboarding routes (no database)");
+        Router::new()
+    };
 
     // ── LP Payout Engine (Liquidity Provider rewards) ─────────────────────────
     let lp_payout_routes = if let (Some(pool), Some(client)) =
@@ -2123,7 +2145,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(security_compliance_routes)
         .merge(lp_payout_routes)
         .merge(governance_routes)
-        .merge(pos_routes)
+        .merge(lp_onboarding_routes)
         .with_state(AppState {
             db_pool,
             redis_cache,
