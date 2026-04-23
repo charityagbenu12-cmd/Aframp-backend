@@ -186,6 +186,10 @@ pub mod lp_onboarding;
 #[cfg(feature = "database")]
 pub mod corridors;
 
+// POS QR Payment System — Physical retail integration
+#[cfg(feature = "database")]
+pub mod pos;
+
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]
 #[contracterror]

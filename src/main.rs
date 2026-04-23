@@ -30,6 +30,7 @@ mod oauth;
 mod payments;
 mod bug_bounty;
 mod pentest;
+mod pos;
 mod recurring;
 mod security_compliance;
 mod services;
@@ -2027,6 +2028,55 @@ async fn main() -> anyhow::Result<()> {
         peg_monitor::peg_monitor_routes(peg_repo)
     } else {
         info!("⏭️  Skipping peg monitor routes (missing database or stellar client)");
+        Router::new()
+    };
+
+    // ── POS QR Payment System ─────────────────────────────────────────────────
+    let pos_routes = if let (Some(pool), Some(client)) = (db_pool.clone(), stellar_client.clone()) {
+        let cngn_issuer = std::env::var("CNGN_ISSUER_ADDRESS")
+            .or_else(|_| std::env::var("CNGN_ISSUER_MAINNET"))
+            .unwrap_or_else(|_| "GXXXXDEFAULTISSUERXXXX".to_string());
+
+        let qr_generator = std::sync::Arc::new(pos::QrGenerator::new(cngn_issuer));
+        let payment_intent_service = std::sync::Arc::new(pos::payment_intent::PaymentIntentService::new(
+            pool.clone(),
+            qr_generator.clone(),
+        ));
+
+        let lobby_service = std::sync::Arc::new(pos::lobby_service::LobbyService::new(
+            pool.clone(),
+            std::sync::Arc::new(client),
+            5, // Poll interval in seconds
+        ));
+
+        // Start lobby service polling worker
+        let lobby_clone = lobby_service.clone();
+        tokio::spawn(async move {
+            lobby_clone.start_polling_worker().await;
+        });
+
+        let legacy_bridge = std::sync::Arc::new(pos::legacy_bridge::LegacyBridge::new(
+            payment_intent_service.clone(),
+        ));
+
+        let verification_secret = std::env::var("POS_VERIFICATION_SECRET")
+            .unwrap_or_else(|_| "default-secret-change-in-production".to_string());
+        let proof_of_payment = std::sync::Arc::new(pos::proof_of_payment::ProofOfPayment::new(
+            pool.clone(),
+            verification_secret,
+        ));
+
+        let pos_state = pos::handlers::PosState {
+            payment_intent_service,
+            lobby_service,
+            legacy_bridge,
+            proof_of_payment,
+        };
+
+        info!("💳 POS QR payment system routes enabled");
+        pos::routes::pos_routes(pos_state)
+    } else {
+        info!("⏭️  Skipping POS routes (missing database or stellar client)");
         Router::new()
     };
     let app = Router::new()

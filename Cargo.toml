@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["database", "cache"]
 integration = []
-database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui", "dep:argon2", "dep:rand", "dep:bcrypt", "dep:totp-rs", "dep:webauthn-rs", "dep:sha1", "dep:jsonwebtoken", "dep:aes-gcm", "dep:p384", "dep:elliptic-curve", "dep:hkdf", "dep:zeroize", "dep:openssl" ]
+database = [ "dep:tokio", "dep:async-trait", "dep:uuid", "dep:chrono", "dep:serde", "dep:serde_json", "dep:tracing", "dep:tracing-subscriber", "dep:axum", "dep:tower", "dep:tower-http", "dep:regex", "dep:http", "dep:sqlx", "dep:hmac", "dep:sha2", "dep:hex", "dep:bigdecimal", "dep:rust_decimal", "dep:stellar-strkey", "dep:ed25519-dalek", "dep:stellar-xdr", "dep:utoipa", "dep:utoipa-swagger-ui", "dep:argon2", "dep:rand", "dep:bcrypt", "dep:totp-rs", "dep:webauthn-rs", "dep:sha1", "dep:jsonwebtoken", "dep:aes-gcm", "dep:p384", "dep:elliptic-curve", "dep:hkdf", "dep:zeroize", "dep:openssl", "dep:qrcode", "dep:image", "dep:urlencoding" ]
 cache = ["dep:redis", "dep:bb8", "dep:bb8-redis", "dep:moka", "dep:prometheus", "dep:tokio-util", "database"]
 
 # Distributed tracing via OpenTelemetry (Issue #104).
@@ -116,6 +116,11 @@ serde_yaml = "0.9"
 # OpenAPI / Swagger UI
 utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"], optional = true }
 utoipa-swagger-ui = { version = "8", features = ["axum"], optional = true }
+
+# QR code generation for POS payments
+qrcode = { version = "0.14", optional = true }
+image = { version = "0.25", optional = true }
+urlencoding = { version = "2.1", optional = true }
 
 # Prometheus metrics
 prometheus = { version = "0.13", features = ["process"], optional = true }
