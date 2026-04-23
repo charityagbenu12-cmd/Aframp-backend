@@ -19,8 +19,10 @@ mod error;
 mod health;
 mod liquidity;
 mod logging;
+mod lp_onboarding;
 mod lp_payout;
 mod metrics;
+mod multisig;
 mod peg_monitor;
 mod middleware;
 mod mtls;
@@ -28,11 +30,13 @@ mod oauth;
 mod payments;
 mod bug_bounty;
 mod pentest;
+mod pos;
 mod recurring;
 mod security_compliance;
 mod services;
 mod telemetry;
 mod workers;
+mod oracle;
 
 // Imports
 use std::sync::Arc;
@@ -780,6 +784,32 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Start Monthly Attestation Worker
+    let attestation_enabled = std::env::var("ATTESTATION_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase() != "false";
+
+    if attestation_enabled {
+        if let Some(pool) = db_pool.clone() {
+            let transparency_key = std::env::var("TRANSPARENCY_SIGNING_KEY").ok();
+            if let Ok(trans_svc) = services::transparency::TransparencyService::new(pool.clone(), transparency_key) {
+                let trans_svc = Arc::new(trans_svc);
+                let audit_repo = Arc::new(audit::repository::AuditLogRepository::new(pool.clone()));
+                let attestation_service = Arc::new(crate::reporting::AttestationService::new(
+                    pool,
+                    trans_svc,
+                    audit_repo,
+                ));
+                let attestation_worker = workers::attestation_worker::AttestationWorker::new(
+                    attestation_service,
+                    notification_service.clone(),
+                );
+                tokio::spawn(attestation_worker.run(worker_shutdown_rx.clone()));
+                info!("✅ Monthly attestation worker started");
+            }
+        }
+    }
+
     // Initialize webhook processor and retry worker
     let webhook_routes = if let Some(pool) = db_pool.clone() {
         let webhook_repo = std::sync::Arc::new(
@@ -878,6 +908,27 @@ async fn main() -> anyhow::Result<()> {
     // Create the application router with logging middleware
     info!("🛣️  Setting up application routes...");
 
+    // ── LP Onboarding & Partner Portal ────────────────────────────────────────
+    let lp_onboarding_routes = if let Some(pool) = db_pool.clone() {
+        let repo = std::sync::Arc::new(lp_onboarding::LpOnboardingRepository::new(pool.clone()));
+        let svc = std::sync::Arc::new(lp_onboarding::LpOnboardingService::new(
+            repo.clone(),
+            std::env::var("DOCUSIGN_BASE_URL")
+                .unwrap_or_else(|_| "https://demo.docusign.net/restapi".into()),
+            std::env::var("DOCUSIGN_ACCOUNT_ID").unwrap_or_default(),
+            std::env::var("DOCUSIGN_ACCESS_TOKEN").unwrap_or_default(),
+        ));
+        let expiry_worker = lp_onboarding::AgreementExpiryWorker::new(repo);
+        tokio::spawn(expiry_worker.run());
+        info!("✅ LP Onboarding service started");
+        lp_onboarding::routes::partner_routes(svc.clone())
+            .merge(lp_onboarding::routes::admin_routes(svc.clone()))
+            .merge(lp_onboarding::routes::webhook_routes(svc))
+    } else {
+        info!("⏭️  Skipping LP onboarding routes (no database)");
+        Router::new()
+    };
+
     // ── LP Payout Engine (Liquidity Provider rewards) ─────────────────────────
     let lp_payout_routes = if let (Some(pool), Some(client)) =
         (db_pool.clone(), stellar_client.clone())
@@ -905,6 +956,28 @@ async fn main() -> anyhow::Result<()> {
     } else {
         info!("⏭️  Skipping LP payout routes (missing database or stellar client)");
         Router::new()
+    };
+
+    // ── Oracle Price Feed (Issue #1.02 — Sensory System) ─────────────────────
+    let oracle_routes = {
+        use oracle::{
+            adapters::{BandProtocolAdapter, BinanceAdapter, CoinbaseAdapter},
+            service::OracleService,
+        };
+
+        let pair = std::env::var("ORACLE_PAIR").unwrap_or_else(|_| "XLM/USD".to_string());
+
+        let adapters: Vec<Box<dyn oracle::adapters::PriceAdapter>> = vec![
+            Box::new(BinanceAdapter::new()),
+            Box::new(CoinbaseAdapter::new()),
+            Box::new(BandProtocolAdapter::new()),
+        ];
+
+        let svc = std::sync::Arc::new(OracleService::new(adapters, pair.clone(), db_pool.clone()));
+        // Kick off the background heartbeat loop
+        svc.clone().start();
+        info!(pair = %pair, "✅ Oracle price feed started");
+        oracle::routes::oracle_routes(svc)
     };
 
     // Setup onramp routes (quote service)
@@ -1893,6 +1966,23 @@ async fn main() -> anyhow::Result<()> {
         info!("⏭️  Skipping OAuth routes (missing database or cache)");
         Router::new()
     };
+
+    // ── Multi-Sig Governance routes (Issue: Multi-Sig Governance) ────────────
+    let governance_routes = if let (Some(pool), Some(client)) =
+        (db_pool.clone(), stellar_client.clone())
+    {
+        let repo = std::sync::Arc::new(multisig::repository::MultiSigRepository::new(pool));
+        let svc = std::sync::Arc::new(multisig::MultiSigService::from_env(
+            repo,
+            std::sync::Arc::new(client),
+        ));
+        info!("🔐 Multi-sig governance routes enabled");
+        multisig::routes::governance_router(svc)
+    } else {
+        info!("⏭️  Skipping multi-sig governance routes (missing database or stellar client)");
+        Router::new()
+    };
+
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
@@ -1989,6 +2079,55 @@ async fn main() -> anyhow::Result<()> {
         info!("⏭️  Skipping peg monitor routes (missing database or stellar client)");
         Router::new()
     };
+
+    // ── POS QR Payment System ─────────────────────────────────────────────────
+    let pos_routes = if let (Some(pool), Some(client)) = (db_pool.clone(), stellar_client.clone()) {
+        let cngn_issuer = std::env::var("CNGN_ISSUER_ADDRESS")
+            .or_else(|_| std::env::var("CNGN_ISSUER_MAINNET"))
+            .unwrap_or_else(|_| "GXXXXDEFAULTISSUERXXXX".to_string());
+
+        let qr_generator = std::sync::Arc::new(pos::QrGenerator::new(cngn_issuer));
+        let payment_intent_service = std::sync::Arc::new(pos::payment_intent::PaymentIntentService::new(
+            pool.clone(),
+            qr_generator.clone(),
+        ));
+
+        let lobby_service = std::sync::Arc::new(pos::lobby_service::LobbyService::new(
+            pool.clone(),
+            std::sync::Arc::new(client),
+            5, // Poll interval in seconds
+        ));
+
+        // Start lobby service polling worker
+        let lobby_clone = lobby_service.clone();
+        tokio::spawn(async move {
+            lobby_clone.start_polling_worker().await;
+        });
+
+        let legacy_bridge = std::sync::Arc::new(pos::legacy_bridge::LegacyBridge::new(
+            payment_intent_service.clone(),
+        ));
+
+        let verification_secret = std::env::var("POS_VERIFICATION_SECRET")
+            .unwrap_or_else(|_| "default-secret-change-in-production".to_string());
+        let proof_of_payment = std::sync::Arc::new(pos::proof_of_payment::ProofOfPayment::new(
+            pool.clone(),
+            verification_secret,
+        ));
+
+        let pos_state = pos::handlers::PosState {
+            payment_intent_service,
+            lobby_service,
+            legacy_bridge,
+            proof_of_payment,
+        };
+
+        info!("💳 POS QR payment system routes enabled");
+        pos::routes::pos_routes(pos_state)
+    } else {
+        info!("⏭️  Skipping POS routes (missing database or stellar client)");
+        Router::new()
+    };
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
@@ -2054,6 +2193,9 @@ async fn main() -> anyhow::Result<()> {
         .merge(Router::new().nest("/api/admin/security", mtls_admin_routes))
         .merge(security_compliance_routes)
         .merge(lp_payout_routes)
+        .merge(oracle_routes)
+        .merge(governance_routes)
+        .merge(lp_onboarding_routes)
         .with_state(AppState {
             db_pool,
             redis_cache,

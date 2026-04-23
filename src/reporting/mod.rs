@@ -11,7 +11,9 @@ pub mod models;
 pub mod repository;
 pub mod statement;
 pub mod handlers;
+pub mod attestation;
 
 pub use models::{PartnerReport, DailySettlementStatement, CorridorAnalytics, ReconciliationEntry};
 pub use repository::ReportingRepository;
 pub use statement::StatementGenerator;
+pub use attestation::AttestationService;

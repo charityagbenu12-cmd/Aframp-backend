@@ -50,6 +50,7 @@ pub mod trustline_operation;
 pub mod webhook_processor;
 #[cfg(feature = "database")]
 pub mod reconciliation;
+pub mod transparency;
 
 // Re-export blockchain traits for convenience
 #[cfg(feature = "database")]

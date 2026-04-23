@@ -214,6 +214,11 @@ impl NotificationService {
             }
         }
     }
+    pub async fn send_system_alert(&self, alert_id: &str, message: &str) {
+        // High-priority system alert for operations, treasury, etc.
+        // For now, persistent logging at WARN/ERROR level + placeholder for pager/slack.
+        error!(alert_id = %alert_id, "🚨 SYSTEM ALERT: {}", message);
+    }
 }
 
 // Backward compat
@@ -229,14 +234,7 @@ pub enum NotificationType {
 pub async fn send_notification(tx: &Transaction, notification_type: NotificationType, message: &str) {
     // Legacy logging
     match notification_type {
-        // ... same as before
         _ => {}
-    }
-
-    pub async fn send_system_alert(&self, alert_id: &str, message: &str) {
-        // High-priority system alert for operations, treasury, etc.
-        // For now, persistent logging at WARN/ERROR level + placeholder for pager/slack.
-        error!(alert_id = %alert_id, "🚨 SYSTEM ALERT: {}", message);
     }
 }
 
