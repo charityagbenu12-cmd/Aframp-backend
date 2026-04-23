@@ -151,6 +151,10 @@ pub mod vault;
 // Treasury Emergency Intervention Framework — one-click peg stabilisation
 #[cfg(feature = "database")]
 pub mod treasury;
+
+// Multi-Signature Governance Framework — M-of-N signing for Mint/Burn/SetOptions
+#[cfg(feature = "database")]
+pub mod multisig;
 // Adaptive rate limiting and throttling system
 #[cfg(feature = "cache")]
 pub mod adaptive_rate_limit;
@@ -169,13 +173,30 @@ pub mod abuse_detection;
 // Security module - anomaly detection and circuit breaker
 #[cfg(feature = "database")]
 pub mod security;
+
+// Oracle price feed — multi-source aggregator with weighted median (Issue #1.02)
+#[cfg(feature = "database")]
+pub mod oracle;
 // Compliance Registry — license tracking, regulatory constraints, corridor governance (Issue #2.02)
 #[cfg(feature = "database")]
 pub mod compliance_registry;
 
+// LP Onboarding & Partner Portal — institutional liquidity provider onboarding,
+// agreement lifecycle, Stellar key allowlisting
+#[cfg(feature = "database")]
+pub mod lp_onboarding;
+
 // Cross-border payment corridor implementations
 #[cfg(feature = "database")]
 pub mod corridors;
+
+// POS QR Payment System — Physical retail integration
+#[cfg(feature = "database")]
+pub mod pos;
+
+// Merchant Gateway — Commercial adoption entry point for businesses
+#[cfg(feature = "database")]
+pub mod merchant_gateway;
 
 // Contract error enum for Soroban (only when not using database feature)
 #[cfg(not(feature = "database"))]

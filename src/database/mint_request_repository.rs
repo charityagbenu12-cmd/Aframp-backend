@@ -76,6 +76,11 @@ impl MintRequestRepository {
         Self { pool }
     }
 
+    /// Expose the pool for services that need to run ad-hoc queries.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     // -------------------------------------------------------------------------
     // MintRequest CRUD
     // -------------------------------------------------------------------------

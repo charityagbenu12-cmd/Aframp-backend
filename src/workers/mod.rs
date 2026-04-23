@@ -5,6 +5,8 @@ pub mod ip_detection_worker;
 #[cfg(feature = "database")]
 pub mod key_rotation_worker;
 pub mod maintenance;
+pub mod mint_sla_worker;
+pub mod merchant_payment_monitor;
 pub mod offramp_processor;
 pub mod onramp_processor;
 pub mod payment_poller;
@@ -17,3 +19,4 @@ pub mod webhook_retry;
 pub mod supply_monitor_worker;
 pub mod liquidity_monitor_worker;
 pub mod por_worker;
+pub mod attestation_worker;
