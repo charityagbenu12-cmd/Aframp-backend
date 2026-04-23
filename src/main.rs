@@ -36,6 +36,7 @@ mod security_compliance;
 mod services;
 mod telemetry;
 mod workers;
+mod oracle;
 
 // Imports
 use std::sync::Arc;
@@ -929,6 +930,28 @@ async fn main() -> anyhow::Result<()> {
     } else {
         info!("⏭️  Skipping LP payout routes (missing database or stellar client)");
         Router::new()
+    };
+
+    // ── Oracle Price Feed (Issue #1.02 — Sensory System) ─────────────────────
+    let oracle_routes = {
+        use oracle::{
+            adapters::{BandProtocolAdapter, BinanceAdapter, CoinbaseAdapter},
+            service::OracleService,
+        };
+
+        let pair = std::env::var("ORACLE_PAIR").unwrap_or_else(|_| "XLM/USD".to_string());
+
+        let adapters: Vec<Box<dyn oracle::adapters::PriceAdapter>> = vec![
+            Box::new(BinanceAdapter::new()),
+            Box::new(CoinbaseAdapter::new()),
+            Box::new(BandProtocolAdapter::new()),
+        ];
+
+        let svc = std::sync::Arc::new(OracleService::new(adapters, pair.clone(), db_pool.clone()));
+        // Kick off the background heartbeat loop
+        svc.clone().start();
+        info!(pair = %pair, "✅ Oracle price feed started");
+        oracle::routes::oracle_routes(svc)
     };
 
     // Setup onramp routes (quote service)
@@ -2144,6 +2167,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(Router::new().nest("/api/admin/security", mtls_admin_routes))
         .merge(security_compliance_routes)
         .merge(lp_payout_routes)
+        .merge(oracle_routes)
         .merge(governance_routes)
         .merge(lp_onboarding_routes)
         .with_state(AppState {

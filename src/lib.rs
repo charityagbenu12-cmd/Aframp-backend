@@ -173,6 +173,10 @@ pub mod abuse_detection;
 // Security module - anomaly detection and circuit breaker
 #[cfg(feature = "database")]
 pub mod security;
+
+// Oracle price feed — multi-source aggregator with weighted median (Issue #1.02)
+#[cfg(feature = "database")]
+pub mod oracle;
 // Compliance Registry — license tracking, regulatory constraints, corridor governance (Issue #2.02)
 #[cfg(feature = "database")]
 pub mod compliance_registry;
