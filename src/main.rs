@@ -35,6 +35,7 @@ mod recurring;
 mod security_compliance;
 mod services;
 mod telemetry;
+mod wallet;
 mod workers;
 mod oracle;
 
@@ -1149,6 +1150,37 @@ async fn main() -> anyhow::Result<()> {
         Router::new()
     };
 
+    // Setup non-custodial wallet architecture routes (Issues #5.01, #5.02, #5.03, #5.04)
+    let noncustodial_wallet_routes = if let Some(pool) = db_pool.clone() {
+        let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
+        let registry = prometheus::default_registry();
+        match wallet::metrics::WalletMetrics::new(registry) {
+            Ok(metrics) => {
+                let state = std::sync::Arc::new(wallet::handlers::WalletAppState {
+                    repo: std::sync::Arc::new(wallet::repository::WalletRegistryRepository::new(pool.clone())),
+                    history_repo: std::sync::Arc::new(wallet::repository::TransactionHistoryRepository::new(pool.clone())),
+                    portfolio_repo: std::sync::Arc::new(wallet::repository::PortfolioRepository::new(pool.clone())),
+                    statement_repo: std::sync::Arc::new(wallet::repository::StatementRepository::new(pool.clone())),
+                    metrics: std::sync::Arc::new(metrics),
+                    jwt_secret,
+                    max_wallets_per_user: std::env::var("MAX_WALLETS_PER_USER").ok().and_then(|v| v.parse().ok()).unwrap_or(10),
+                    challenge_ttl_secs: 300,
+                    recovery_attack_threshold: std::env::var("RECOVERY_ATTACK_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(10),
+                    unconfirmed_backup_alert_threshold: std::env::var("UNCONFIRMED_BACKUP_ALERT_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(100),
+                });
+                info!("✅ Non-custodial wallet routes enabled");
+                wallet::routes::wallet_routes(state)
+            }
+            Err(e) => {
+                tracing::warn!("Wallet metrics registration failed ({}); skipping wallet routes", e);
+                Router::new()
+            }
+        }
+    } else {
+        info!("⏭️  Skipping non-custodial wallet routes (no database)");
+        Router::new()
+    };
+
     // Setup wallet routes with balance service
     let wallet_routes = if let (Some(client), Some(cache)) = (stellar_client.clone(), redis_cache.clone()) {
         let cngn_issuer = std::env::var("CNGN_ISSUER_ADDRESS")
@@ -2051,6 +2083,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(onramp_routes)
         .merge(offramp_routes)
         .merge(wallet_routes)
+        .merge(noncustodial_wallet_routes)
         .merge(rates_routes)
         .merge(fees_routes)
         .merge(mint_routes)

@@ -190,6 +190,9 @@ pub mod lp_onboarding;
 #[cfg(feature = "database")]
 pub mod corridors;
 
+// Non-custodial wallet architecture, recovery, history, and portfolio
+#[cfg(feature = "database")]
+pub mod wallet;
 // POS QR Payment System — Physical retail integration
 #[cfg(feature = "database")]
 pub mod pos;
